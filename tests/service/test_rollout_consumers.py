@@ -35,7 +35,11 @@ def test_observer_waits_for_the_current_rollout(monkeypatch, klass):
     observer.run_cmd = Mock(side_effect=[response(total=2), response(updated=0), response()])
     observer._wait_for_ready(timeout=1)
     assert observer.run_cmd.call_count == 3
-    assert "-o json" in observer.run_cmd.call_args.args[0]
+    command = observer.run_cmd.call_args.args[0]
+    if isinstance(command, list):
+        assert command[-2:] == ["-o", "json"]
+    else:
+        assert "-o json" in command
 
 
 @pytest.mark.parametrize(
