@@ -6,11 +6,12 @@ import json
 import os
 import secrets
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sregym.observability.base import new_run_id, validate_run_id
 from sregym.service.container_runner import DEFAULT_AGENT_IMAGE
 
 
@@ -45,8 +46,9 @@ class RunArtifacts:
         problem_id: str,
         agent: str,
         attempt: int,
+        artifact_id: str | None = None,
     ) -> "RunArtifacts":
-        artifact_id = f"anon_{secrets.token_hex(16)}"
+        artifact_id = new_run_id() if artifact_id is None else validate_run_id(artifact_id)
         active_dir = staging_root / agent / artifact_id
         staging_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging_root.chmod(0o700)
@@ -289,7 +291,7 @@ def _csv_problem_ids(path: Path) -> list[str]:
         return [row.get("problem_id", "") for row in reader] if reader.fieldnames else []
 
 
-def _write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
+def _write_csv(path: Path, fields: Sequence[str], rows: list[dict[str, Any]]) -> None:
     tmp = _temp_path(path)
     try:
         with tmp.open("w", newline="", encoding="utf-8") as csvfile:

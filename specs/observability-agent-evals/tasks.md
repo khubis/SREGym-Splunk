@@ -58,7 +58,9 @@ Traceability is a live checklist: each row names the focused test locations that
 
 ## [provider] Reusable Provider Foundation — Upstream Candidate
 
-- [ ] **B. Add the optional provider contract and opaque attempt identity** — First add failing unit tests for the `none` provider, strict `anon_<32 hex>` validation, collision rejection, distinct resume identities, typed failure taxonomy, and secret-free serialization. Implement `sregym.observability.base`, the factory, and preallocated `RunArtifacts` identity support per `contracts/observability-provider.md`; default-disabled behavior must remain byte/behavior compatible. Requirements: R1, R3, R5, R7, R9. Planned commit: `feat(observability): add optional provider lifecycle`.
+- [x] **B. Add the optional provider contract and opaque attempt identity** — First add failing unit tests for the `none` provider, strict `anon_<32 hex>` validation, collision rejection, distinct resume identities, typed failure taxonomy, and secret-free serialization. Implement `sregym.observability.base`, the factory, and preallocated `RunArtifacts` identity support per `contracts/observability-provider.md`; default-disabled behavior must remain byte/behavior compatible. Requirements: R1, R3, R5, R7, R9. Planned commit: `feat(observability): add optional provider lifecycle`.
+
+  Evidence: the focused suite first failed because `sregym.observability` did not exist. The completed suite has 19 passing tests with 100% statement/branch coverage for the new provider package. The 122-test affected regression matrix passes, including artifact publication, campaign abort/resume, conductor wiring, container hardening, deployment profiles, and trace conversion; changed production lines have 100% diff coverage.
 
 ## [security] Agent Capability Isolation — Upstream Candidate
 
