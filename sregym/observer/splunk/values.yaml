@@ -1,0 +1,63 @@
+# Non-secret overrides for splunk-otel-collector chart 0.160.0.
+fullnameOverride: sregym-splunk-otel
+
+secret:
+  create: false
+  name: sregym-splunk-otel-credentials
+  validateSecret: true
+
+featureGates:
+  mountSplunkSecretAsFile: true
+
+splunkPlatform:
+  logsEnabled: true
+  metricsEnabled: false
+  tracesEnabled: false
+  insecureSkipVerify: false
+  retryOnFailure:
+    enabled: true
+    initialInterval: 5s
+    maxInterval: 30s
+    maxElapsedTime: 300s
+  sendingQueue:
+    enabled: true
+    numConsumers: 4
+    queueSize: 1000
+
+splunkObservability:
+  metricsEnabled: true
+  tracesEnabled: true
+
+agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+clusterReceiver:
+  enabled: true
+  eventsEnabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+gateway:
+  enabled: true
+  tokenPassthrough: false
+  mode: deployment
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi

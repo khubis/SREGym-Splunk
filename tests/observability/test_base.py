@@ -42,8 +42,7 @@ def readiness_report(run_id: str = RUN_ID) -> ReadinessReport:
     return ReadinessReport(
         run_id=run_id,
         signals=tuple(
-            SignalReadiness(signal=signal, ready=True, checked_at=NOW, evidence={"count": 1})
-            for signal in SIGNAL_NAMES
+            SignalReadiness(signal=signal, ready=True, checked_at=NOW, evidence={"count": 1}) for signal in SIGNAL_NAMES
         ),
         ready=True,
     )
@@ -136,11 +135,7 @@ def test_null_provider_is_an_immediately_ready_noop():
     assert provider.close() is None
 
 
-def test_factory_rejects_unavailable_or_unknown_providers_without_echoing_input():
-    with pytest.raises(ProviderError) as unavailable:
-        create_provider("splunk")
-    assert unavailable.value.kind == "configuration"
-
+def test_factory_rejects_unknown_providers_without_echoing_input():
     supplied = "unknown-provider-with-sensitive-suffix"
     with pytest.raises(ValueError) as unknown:
         create_provider(supplied)

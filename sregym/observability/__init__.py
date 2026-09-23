@@ -1,6 +1,6 @@
 """Observability provider selection."""
 
-from sregym.observability.base import NullObservabilityProvider, ObservabilityProvider, ProviderError
+from sregym.observability.base import NullObservabilityProvider, ObservabilityProvider
 
 
 def create_provider(name: str) -> ObservabilityProvider:
@@ -8,7 +8,9 @@ def create_provider(name: str) -> ObservabilityProvider:
     if name == "none":
         return NullObservabilityProvider()
     if name == "splunk":
-        raise ProviderError("configuration", "the Splunk observability provider is not installed")
+        from sregym.observability.splunk import SplunkConfig, SplunkObservabilityProvider
+
+        return SplunkObservabilityProvider(SplunkConfig.from_env())
     raise ValueError("unsupported observability provider")
 
 
