@@ -33,7 +33,28 @@ No task may modify an SRE Gym scenario, oracle, rubric, pass threshold, workload
 
 ## [quality] Test and Coverage Foundation
 
-- [ ] **A. Establish the test-first and coverage gate** — Add dev-only `pytest-cov` and `diff-cover`, lock dependencies, and configure branch coverage without changing runtime dependencies. Add a traceability checklist mapping R1–R9 to test files. Record the clean pre-feature regression baseline, then prove the coverage command fails against one temporary uncovered branch before removing that temporary change. Final gates: 100% statement/branch coverage for new feature modules and `diff-cover coverage.xml --compare-branch upstream/main --fail-under=100`. Planned commit: `test(evals): establish observability integration coverage gates`.
+- [x] **A. Establish the test-first and coverage gate** — Add dev-only `pytest-cov` and `diff-cover`, lock dependencies, and configure branch coverage without changing runtime dependencies. Add a traceability checklist mapping R1–R9 to test files. Record the clean pre-feature regression baseline, then prove the coverage command fails against one temporary uncovered branch before removing that temporary change. Final gates: 100% statement/branch coverage for new feature modules and `diff-cover coverage.xml --compare-branch upstream/main --fail-under=100`. Planned commit: `test(evals): establish observability integration coverage gates`.
+
+### Task A verification evidence
+
+- Tooling red test: before the dev dependencies were added, pytest rejected `--cov`, `--cov-branch`, and `--cov-fail-under` as unknown arguments.
+- Coverage-gate red test: a temporary two-branch probe with only one branch exercised passed its functional test but failed `--cov-fail-under=100` at 67% coverage. The probe was then removed.
+- Relevant pre-feature regression baseline: 58 tests passed across runner abort/resume, conductor phase/stage wiring, container hardening, and trace conversion.
+- Full `pytest -m "not integration"` baseline cannot currently collect because of five pre-existing environment/test-layout failures: the train-ticket gateway requires a cluster, the flight-ticket runtime endpoint is absent, two duplicate test module names collide during collection, and `clients.test_k8s_agent` is absent. This task does not suppress or alter those tests.
+
+Traceability is a live checklist: each row names the focused test locations that must verify the requirement before K2 can be checked off.
+
+| Requirement | Planned automated test files | Covered |
+|---|---|---|
+| R1 | `tests/observability/test_base.py`; `tests/clients/test_assistant_v3_driver.py`; existing runner/conductor regression tests | [ ] |
+| R2 | `tests/clients/test_assistant_v3_prompt.py` | [ ] |
+| R3 | `tests/observability/test_base.py`; `tests/observability/test_splunk.py`; OTel collector rendering tests | [ ] |
+| R4 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; registry/launcher/container tests | [ ] |
+| R5 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [ ] |
+| R6 | `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [ ] |
+| R7 | `tests/observability/test_splunk.py`; `tests/clients/test_assistant_v3_client.py`; runner resume/cleanup tests | [ ] |
+| R8 | Assistant v3 command/documentation tests; artifact spot-check fixtures | [ ] |
+| R9 | All focused files above; final new-module coverage and changed-line coverage gates | [ ] |
 
 ## [provider] Reusable Provider Foundation — Upstream Candidate
 
