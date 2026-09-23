@@ -8,6 +8,7 @@ that is the whole reason the ledger exists.
 
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -235,6 +236,39 @@ def test_provider_prepares_before_telemetry_deploy_and_readiness_precedes_launch
     assert report.ready is True
 
 
+def test_conductor_initializes_observability_state(monkeypatch):
+    for name in (
+        "ProblemRegistry",
+        "KubeCtl",
+        "Prometheus",
+        "Jaeger",
+        "OtelCollector",
+        "Loki",
+        "AppRegistry",
+        "KubernetesAPIProxy",
+        "ClusterEgressBoundary",
+    ):
+        monkeypatch.setattr(conductor_mod, name, Mock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(conductor_mod, "MCPServer", Mock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(conductor_mod, "KhaosController", Mock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(conductor_mod, "DmFlakeyManager", Mock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(conductor_mod, "ClusterStateManager", Mock(return_value=SimpleNamespace()))
+
+    conductor = Conductor()
+
+    assert conductor._observability_provider is None
+    assert conductor._observability_context is None
+    assert conductor.observability_export is None
+    assert conductor.observability_readiness is None
+    assert conductor.observability_delivery is None
+
+
+def test_application_scope_requires_a_deployed_application(bare):
+    bare.app = None
+    with pytest.raises(RuntimeError, match="before application deployment"):
+        bare._application_scope()
+
+
 def test_delivery_audit_runs_once_before_destructive_cleanup(bare):
     events = []
     provider = RecordingProvider(events)
@@ -309,6 +343,51 @@ def test_finish_problem_cleans_up_after_classified_delivery_failure(bare):
     _finish_ready_bare(bare, events)
     provider = RecordingProvider(events)
     provider.finish_attempt = Mock(side_effect=ProviderError("cleanup", "delivery unavailable"))
+    context = AttemptContext(
+        run_id="anon_0123456789abcdef0123456789abcdef",
+        profile="full",
+        comparable=True,
+        attempt_started_at=datetime.now(UTC),
+    )
+    bare.app = SimpleNamespace(app_name="app", namespace="namespace")
+    bare.bind_observability_attempt(provider, context)
+
+    bare._finish_problem()
+
+    assert events == ["cleanup"]
+    assert bare.results["infrastructure_invalid"] is True
+    assert bare.results["included_in_diagnosis_pass_rate"] is False
+    assert bare.results["observability_error"] == "cleanup"
+
+
+def test_finish_problem_marks_an_invalid_delivery_before_cleanup(bare):
+    events = []
+    _finish_ready_bare(bare, events)
+    provider = RecordingProvider(events)
+    context = AttemptContext(
+        run_id="anon_0123456789abcdef0123456789abcdef",
+        profile="full",
+        comparable=True,
+        attempt_started_at=datetime.now(UTC),
+    )
+    bare.app = SimpleNamespace(app_name="app", namespace="namespace")
+    valid = provider.finish_attempt(context, ApplicationScope("app", ("namespace",)))
+    events.clear()
+    provider.finish_attempt = Mock(return_value=replace(valid, valid=False))
+    bare.bind_observability_attempt(provider, context)
+
+    bare._finish_problem()
+
+    assert events == ["cleanup"]
+    assert bare.results["infrastructure_invalid"] is True
+    assert bare.results["included_in_diagnosis_pass_rate"] is False
+
+
+def test_finish_problem_cleans_up_after_unexpected_delivery_failure(bare):
+    events = []
+    _finish_ready_bare(bare, events)
+    provider = RecordingProvider(events)
+    provider.finish_attempt = Mock(side_effect=RuntimeError("unexpected"))
     context = AttemptContext(
         run_id="anon_0123456789abcdef0123456789abcdef",
         profile="full",

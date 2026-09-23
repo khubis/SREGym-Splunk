@@ -46,15 +46,15 @@ Traceability is a live checklist: each row names the focused test locations that
 
 | Requirement | Planned automated test files | Covered |
 |---|---|---|
-| R1 | `tests/observability/test_base.py`; `tests/clients/test_assistant_v3_driver.py`; existing runner/conductor regression tests | [ ] |
-| R2 | `tests/clients/test_assistant_v3_prompt.py` | [ ] |
-| R3 | `tests/observability/test_base.py`; `tests/observability/test_splunk.py`; OTel collector rendering tests | [ ] |
-| R4 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; registry/launcher/container tests | [ ] |
-| R5 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [ ] |
-| R6 | `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [ ] |
-| R7 | `tests/observability/test_splunk.py`; `tests/clients/test_assistant_v3_client.py`; runner resume/cleanup tests | [ ] |
-| R8 | Assistant v3 command/documentation tests; artifact spot-check fixtures | [ ] |
-| R9 | All focused files above; final new-module coverage and changed-line coverage gates | [ ] |
+| R1 | `tests/observability/test_base.py`; `tests/clients/test_assistant_v3_driver.py`; existing runner/conductor regression tests | [x] |
+| R2 | `tests/clients/test_assistant_v3_prompt.py` | [x] |
+| R3 | `tests/observability/test_base.py`; `tests/observability/test_splunk.py`; OTel collector rendering tests | [x] |
+| R4 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; registry/launcher/container tests | [x] |
+| R5 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [x] |
+| R6 | `tests/clients/test_assistant_v3_driver.py`; `tests/traces/test_assistant_v3_adapter.py` | [x] |
+| R7 | `tests/observability/test_splunk.py`; `tests/clients/test_assistant_v3_client.py`; runner resume/cleanup tests | [x] |
+| R8 | Assistant v3 command/documentation tests; artifact spot-check fixtures | [x] |
+| R9 | All focused files above; final new-module coverage and changed-line coverage gates | [x] |
 
 ## [provider] Reusable Provider Foundation — Upstream Candidate
 
@@ -114,7 +114,41 @@ Traceability is a live checklist: each row names the focused test locations that
 
   Evidence: fail-first tests initially failed on the absent Conductor provider hooks, Assistant orchestration types, campaign validation, and filtered Assistant endpoint rule. The finished lifecycle prepares external export after stale-app removal and before deployment/baseline, requires four-signal query readiness after fault injection and before launch, audits closing delivery before cleanup, and preserves the original zero-argument collector path for existing agents using provider `none`. The Assistant driver uses only `/status`, one `/get_app`, one fresh explicit-model/reasoning SSE session, and at most one diagnosis `/submit`; invalid streams and ambiguous submissions are preserved without submission/retry. Pre-agent and post-agent infrastructure failures publish secret-scanned artifacts, invalid delivery is excluded from diagnosis pass rate, full/svelte comparability is explicit, and each redacted event is durably spooled before terminal interpretation. The driver suite has 99 passing tests at 100% statement/branch coverage; 186 focused runner/provider/driver regressions and a 1,338-test affected matrix pass with one expected skip. Ruff and focused Pyright checks pass. The repository-wide collection and cross-module coverage commands remain intentionally deferred to K2; the unmodified suite currently has two known collection constraints outside this task (`clients.test_k8s_agent` is absent, and duplicate `test_kafka_producer_leak` module names collide under default import mode).
 
-- [ ] **K2. Run the complete offline verification matrix** — Run focused suites for every preceding task, all existing trace/runner/container tests, the full non-integration test suite, Ruff, Pyright, ATIF validation, secret scans, 100% new-module branch coverage, and 100% changed-line coverage. Fix only defects within the approved files; any required scope expansion pauses for approval. Produce the final requirement-to-test and changed-production-file-to-test table. Planned commit only if fixes are necessary: `fix(evals): close observability integration verification gaps`.
+- [x] **K2. Run the complete offline verification matrix** — Run focused suites for every preceding task, all existing trace/runner/container tests, the full non-integration test suite, Ruff, Pyright, ATIF validation, secret scans, 100% new-module branch coverage, and 100% changed-line coverage. Fix only defects within the approved files; any required scope expansion pauses for approval. Produce the final requirement-to-test and changed-production-file-to-test table. Planned commit only if fixes are necessary: `fix(evals): close observability integration verification gaps`.
+
+  Evidence: K2 added focused orchestration tests for previously unexecuted provider readiness, pre-agent publication, Assistant launch/finalization, provider shutdown, Conductor delivery-failure, and optional OTel-export branches; no production behavior changed. The final affected matrix has 1,386 passing tests with one expected skip. The full runnable non-integration matrix has 2,404 passing tests, three expected skips, and nine integration deselections. The exact new-module gates report 100% statement/branch coverage for `clients.assistant_v3`, `sregym.observability`, and `atif_converter.adapters.assistant_v3`; a stricter repository-instrumented report gives every changed production file 100% changed-line coverage. The complete trace/ATIF suite has 257 passing tests with one expected skip. Changed files pass Ruff and applicable Pyright checks, and a `detect-secrets` scan reports no candidates or tracked `.env` files.
+
+  The unmodified upstream tree still prevents an unqualified repository-wide green command: three import/environment collection failures, four tests failing in untouched application/Kafka/kubectl-tool code, three Ruff findings in untouched files, and broad pre-existing Pyright debt. K2 does not suppress or repair those unrelated failures; the passing full matrix excludes only those named baseline files, and `--import-mode=importlib` avoids the upstream duplicate test-module-name collision.
+
+### Final requirement-to-test traceability
+
+| Requirement | Final automated evidence |
+|---|---|
+| R1 | `tests/test_main_campaign_abort.py`; `tests/conductor/test_phase_wiring.py`; `tests/test_deployment_profiles.py`; Lite selection regressions |
+| R2 | `tests/clients/test_assistant_v3_prompt.py` reference hash, ordered substitutions, provenance, and forbidden-hint cases |
+| R3 | `tests/observability/test_base.py`; `tests/observability/test_otel_collector.py`; `tests/observability/test_splunk.py`; `tests/test_infrastructure_reuse.py` |
+| R4 | `tests/clients/test_assistant_v3_client.py`; `tests/clients/test_assistant_v3_driver.py`; `tests/service/test_agent_capabilities.py`; `tests/test_main_campaign_abort.py` |
+| R5 | Assistant client/driver golden artifacts plus `tests/traces/test_assistant_v3_adapter.py` and the complete trace suite |
+| R6 | Driver metric golden cases, delivery invalidation cases, ATIF usage/error mapping, and explicit judge metadata tests |
+| R7 | Splunk retry/drain tests, Assistant stream retry/failure tests, campaign abort/resume, Conductor cleanup, and provider-close tests |
+| R8 | CLI option/help test, deterministic artifact fixtures, and direct prompt/diagnosis/tool/delivery inspection coverage; operator documentation remains the explicit scope of Task L |
+| R9 | Fail-first evidence in A–K, focused suites, secret scan, 100% new-module branch coverage, and 100% changed-production-line coverage |
+
+### Changed production file-to-test traceability
+
+| Production files | Focused automated tests |
+|---|---|
+| `agents.yaml`; `sregym/agent_registry.py`; `sregym/agent_launcher.py` | `tests/test_agent_registry.py`; `tests/service/test_agent_capabilities.py` |
+| `sregym/service/container_runner.py` | `tests/service/test_agent_capabilities.py`; existing container, endpoint, hardening, credential, and internet-audit suites |
+| `sregym/observability/__init__.py`; `sregym/observability/base.py`; `sregym/run_artifacts.py` | `tests/observability/test_base.py`; runner artifact and resume regressions |
+| `sregym/observability/splunk.py`; `sregym/observer/splunk/values.yaml` | `tests/observability/test_splunk.py` |
+| `sregym/observer/otel_collector/otel_collector.py` | `tests/observability/test_otel_collector.py`; `tests/test_infrastructure_reuse.py` |
+| `clients/assistant_v3/prompt.py`; immutable prompt assets | `tests/clients/test_assistant_v3_prompt.py` |
+| `clients/assistant_v3/client.py` | `tests/clients/test_assistant_v3_client.py` |
+| `clients/assistant_v3/driver.py` | `tests/clients/test_assistant_v3_driver.py`; `tests/test_main_campaign_abort.py` |
+| `main.py` | `tests/test_main_campaign_abort.py`; `tests/test_deployment_profiles.py`; runner abort/resume and judge/container lifecycle suites |
+| `sregym/conductor/conductor.py` | `tests/conductor/test_phase_wiring.py`; `tests/test_infrastructure_reuse.py`; existing conductor stage/submission regressions |
+| `atif_converter/adapters/assistant_v3.py`; `atif_converter/converter.py`; `sregym/traces/convert.py` | `tests/traces/test_assistant_v3_adapter.py`; complete `tests/traces` suite and SQLite round-trip cases |
 
 ## [workflow/docs] Operator Experience
 

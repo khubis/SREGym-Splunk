@@ -163,6 +163,26 @@ def test_healthy_infrastructure_is_not_patched(startup):
     assert startup._openebs_ready.call_count == 2
 
 
+@pytest.mark.parametrize("external_export", [None, SimpleNamespace(endpoint="collector:4317")])
+def test_observer_setup_forwards_only_configured_external_export(startup, external_export):
+    startup.prometheus.deploy.side_effect = None
+    startup.jaeger = MagicMock()
+    startup.otel_collector = MagicMock()
+    startup.loki = MagicMock()
+    startup.mcp_server = MagicMock()
+    startup.mcp_server.deploy.side_effect = ObserverSetupReached
+    startup.config = SimpleNamespace(deploy_loki=True)
+    startup.observability_export = external_export
+
+    with pytest.raises(ObserverSetupReached):
+        startup.deploy_app()
+
+    if external_export is None:
+        startup.otel_collector.deploy.assert_called_once_with()
+    else:
+        startup.otel_collector.deploy.assert_called_once_with(external_export)
+
+
 @pytest.mark.parametrize(
     "check,name", [("_metrics_server_configured", "metrics-server"), ("_openebs_ready", "OpenEBS")]
 )
