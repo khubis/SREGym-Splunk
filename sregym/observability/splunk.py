@@ -1,19 +1,25 @@
 """Secure deployment of the Splunk OpenTelemetry Collector."""
 
+import json
 import os
+import random
 import re
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Any, NoReturn, Protocol, cast
 
+import httpx
 import yaml
 from kubernetes import client
 from kubernetes import config as kubernetes_config
 from kubernetes.client.rest import ApiException
 
 from sregym.observability.base import (
+    SIGNAL_NAMES,
     ApplicationScope,
     AttemptContext,
     DeliveryReport,
@@ -22,6 +28,8 @@ from sregym.observability.base import (
     ProviderError,
     ProviderName,
     ReadinessReport,
+    SignalName,
+    SignalReadiness,
 )
 
 CHART_VERSION = "0.160.0"
@@ -38,6 +46,465 @@ _HOST_PATTERN = re.compile(
 _REALM_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _INDEX_PATTERN = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _DEFAULT_VALUES_PATH = Path(__file__).parents[1] / "observer" / "splunk" / "values.yaml"
+
+
+@dataclass(frozen=True)
+class ReliabilityPolicy:
+    """Bounded polling controls shared by readiness and delivery assurance."""
+
+    readiness_timeout_seconds: float = 180.0
+    drain_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 10.0
+    max_attempts: int = 12
+    initial_backoff_seconds: float = 1.0
+    max_backoff_seconds: float = 10.0
+    retry_after_cap_seconds: float = 15.0
+
+    def __post_init__(self) -> None:
+        numeric = (
+            self.readiness_timeout_seconds,
+            self.drain_timeout_seconds,
+            self.request_timeout_seconds,
+            self.initial_backoff_seconds,
+            self.max_backoff_seconds,
+            self.retry_after_cap_seconds,
+        )
+        if self.max_attempts < 1 or any(value <= 0 for value in numeric):
+            raise ValueError("reliability policy values must be positive")
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise ValueError("maximum backoff must not be smaller than initial backoff")
+
+
+@dataclass(frozen=True)
+class CollectorSnapshot:
+    """One safe sample of the collector's cumulative reliability metrics."""
+
+    sent: dict[SignalName, int | None]
+    send_failed: dict[SignalName, int | None]
+    enqueue_failed: dict[SignalName, int | None]
+    queue_size: dict[SignalName, int | None]
+
+
+class SplunkBackendError(RuntimeError):
+    """Classified, payload-free error returned by the Splunk query backend."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None,
+        transient: bool,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__("Splunk query request failed")
+        self.status_code = status_code
+        self.transient = transient
+        self.retry_after_seconds = retry_after_seconds
+
+
+class SplunkQueryBackend(Protocol):
+    def resolve_logs_connection(self, timeout_seconds: float) -> str: ...
+
+    def query_signal(
+        self,
+        signal: SignalName,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int: ...
+
+    def collector_snapshot(
+        self,
+        context: AttemptContext,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> CollectorSnapshot: ...
+
+    def close(self) -> None: ...
+
+
+_CONNECTIONS_QUERY = """
+query getConnections($includeSplunkCloudSSO: Boolean) {
+  getConnections(includeSplunkCloudSSO: $includeSplunkCloudSSO) {
+    connectionID connectionName isDefaultConnection isAccessible
+  }
+}
+"""
+_START_TRACE_QUERY = """
+query StartAnalyticsSearch($parameters: JSON!) {
+  startAnalyticsSearch(parameters: $parameters)
+}
+"""
+_GET_TRACE_QUERY = """
+query GetAnalyticsSearch($jobId: ID!) {
+  getAnalyticsSearch(jobId: $jobId)
+}
+"""
+_CREATE_LOG_JOB = """
+mutation createSearchJob(
+  $query: String!, $queryType: QueryType, $queryParameters: SearchJobQueryParametersInput!,
+  $connectionID: String, $enablePreview: Boolean
+) {
+  createSearchJob(data: {
+    query: $query, queryType: $queryType, queryParameters: $queryParameters,
+    connectionID: $connectionID, enablePreview: $enablePreview
+  }) { id status percentComplete query }
+}
+"""
+_LOG_JOB_RESULTS = """
+query searchJobResultsWithoutFieldsSummary($id: ID!, $count: Int, $offset: Int) {
+  searchJob(id: $id) {
+    id status percentComplete resultsAvailable resolvedEarliest resolvedLatest
+    results(count: $count, offset: $offset) { fields { name } results }
+  }
+}
+"""
+_COMPLETE_JOB_STATUSES = frozenset({"done", "completed", "complete", "success", "succeeded"})
+
+
+class SplunkHttpBackend:
+    """Read-only Splunk APIs used to prove end-to-end signal visibility."""
+
+    def __init__(self, configuration: "SplunkConfig", *, http_client: httpx.Client | None = None) -> None:
+        self.configuration = configuration
+        self._client = http_client or httpx.Client()
+        self._owns_client = http_client is None
+        self._app_base = f"https://app.{configuration.realm}.signalfx.com"
+        self._stream_base = f"https://stream.{configuration.realm}.signalfx.com"
+        self._trace_jobs: dict[str, str] = {}
+        self._log_jobs: dict[tuple[str, SignalName], str] = {}
+
+    def resolve_logs_connection(self, timeout_seconds: float) -> str:
+        payload = self._graphql(
+            f"{self._app_base}/v2/logs/graphql",
+            "getConnections",
+            _CONNECTIONS_QUERY,
+            {"includeSplunkCloudSSO": True},
+            timeout_seconds,
+        )
+        connections = payload.get("data", {}).get("getConnections", [])
+        accessible = [item for item in connections if item.get("isAccessible") and item.get("connectionID")]
+        selected = next((item for item in accessible if item.get("isDefaultConnection")), None)
+        if selected is None and accessible:
+            selected = accessible[0]
+        if selected is None:
+            raise SplunkBackendError(status_code=400, transient=False)
+        return cast(str, selected["connectionID"])
+
+    def query_signal(
+        self,
+        signal: SignalName,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int:
+        if signal == "metrics":
+            namespace_filter = " or ".join(
+                f"filter('k8s.namespace.name', '{namespace}')" for namespace in scope.namespaces
+            )
+            program = (
+                "data('k8s.container.cpu.utilization', filter=filter('sregym.run.id', "
+                f"'{context.run_id}') and ({namespace_filter}), rollup='count')"
+                ".count().publish(label='readiness')"
+            )
+            return int(
+                self._signalflow(program, context.attempt_started_at, checked_at, timeout_seconds).get("readiness", 0)
+            )
+        if signal == "traces":
+            payload = self._query_traces(context, scope, checked_at, timeout_seconds)
+            search = payload.get("data", {}).get("startAnalyticsSearch") or payload.get("data", {}).get(
+                "getAnalyticsSearch", {}
+            )
+            sections = search.get("sections", []) if isinstance(search, dict) else []
+            examples = [
+                example
+                for section in sections
+                if section.get("sectionType") == "traceExamples"
+                for example in (
+                    section.get("traceExamples")
+                    or section.get("legacyTraceExamples")
+                    or section.get("data", {}).get("traceExamples", [])
+                )
+            ]
+            return len(examples)
+        return self._query_logs(signal, context, scope, connection_id, checked_at, timeout_seconds)
+
+    def collector_snapshot(
+        self,
+        context: AttemptContext,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> CollectorSnapshot:
+        labels = {
+            "sent_metrics": "otelcol_exporter_sent_metric_points",
+            "sent_traces": "otelcol_exporter_sent_spans",
+            "sent_logs": "otelcol_exporter_sent_log_records",
+            "failed_metrics": "otelcol_exporter_send_failed_metric_points",
+            "failed_traces": "otelcol_exporter_send_failed_spans",
+            "failed_logs": "otelcol_exporter_send_failed_log_records",
+            "enqueue_metrics": "otelcol_exporter_enqueue_failed_metric_points",
+            "enqueue_traces": "otelcol_exporter_enqueue_failed_spans",
+            "enqueue_logs": "otelcol_exporter_enqueue_failed_log_records",
+        }
+        statements = [
+            f"data('{metric}', filter=filter('sregym.run.id', '{context.run_id}'), rollup='latest').max().publish(label='{label}')"
+            for label, metric in labels.items()
+        ]
+        for data_type in ("metrics", "traces", "logs"):
+            statements.append(
+                "data('otelcol_exporter_queue_size', filter=filter('sregym.run.id', "
+                f"'{context.run_id}') and filter('data_type', '{data_type}'), rollup='latest')"
+                f".max().publish(label='queue_{data_type}')"
+            )
+        values = self._signalflow("\n".join(statements), context.attempt_started_at, checked_at, timeout_seconds)
+
+        def group(prefix: str) -> dict[SignalName, int | None]:
+            return {
+                "metrics": _optional_int(values.get(f"{prefix}_metrics")),
+                "traces": _optional_int(values.get(f"{prefix}_traces")),
+                "logs": _optional_int(values.get(f"{prefix}_logs")),
+                "kubernetes_events": _optional_int(values.get(f"{prefix}_logs")),
+            }
+
+        return CollectorSnapshot(
+            sent=group("sent"),
+            send_failed=group("failed"),
+            enqueue_failed=group("enqueue"),
+            queue_size=group("queue"),
+        )
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def _query_logs(
+        self,
+        signal: SignalName,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int:
+        namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
+        kind = "k8s.container.name=*" if signal == "logs" else "k8s.event.reason=*"
+        query = f'search index="{self.configuration.hec_index}" "{context.run_id}" ({namespaces}) {kind} | head 1'
+        job_key = (context.run_id, signal)
+        job_id = self._log_jobs.get(job_key)
+        if job_id is None:
+            created = self._graphql(
+                f"{self._app_base}/v2/logs/graphql",
+                "createSearchJob",
+                _CREATE_LOG_JOB,
+                {
+                    "query": query,
+                    "queryType": "SPL1",
+                    "queryParameters": {
+                        "timezone": "UTC",
+                        "earliest": str(int(context.attempt_started_at.timestamp())),
+                        "latest": str(int(checked_at.timestamp())),
+                    },
+                    "connectionID": connection_id,
+                    "enablePreview": True,
+                },
+                timeout_seconds,
+            )
+            job_id = created.get("data", {}).get("createSearchJob", {}).get("id")
+            if not job_id:
+                raise SplunkBackendError(status_code=500, transient=True)
+            self._log_jobs[job_key] = str(job_id)
+        result = self._graphql(
+            f"{self._app_base}/v2/logs/graphql",
+            "searchJobResultsWithoutFieldsSummary",
+            _LOG_JOB_RESULTS,
+            {"id": job_id, "count": 1, "offset": 0},
+            timeout_seconds,
+        )
+        job = result.get("data", {}).get("searchJob", {})
+        rows = job.get("results", {}).get("results", [])
+        if str(job.get("status", "")).strip().lower() in _COMPLETE_JOB_STATUSES:
+            self._log_jobs.pop(job_key, None)
+        return len(rows)
+
+    def _query_traces(
+        self,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        job_id = self._trace_jobs.get(context.run_id)
+        if job_id is not None:
+            payload = self._graphql(
+                f"{self._app_base}/v2/apm/graphql",
+                "GetAnalyticsSearch",
+                _GET_TRACE_QUERY,
+                {"jobId": job_id},
+                timeout_seconds,
+            )
+            field = "getAnalyticsSearch"
+        else:
+            tags = [
+                {"tag": "sregym.run.id", "operation": "IN", "values": [context.run_id]},
+                {"tag": "k8s.namespace.name", "operation": "IN", "values": list(scope.namespaces)},
+            ]
+            parameters = {
+                "sharedParameters": {
+                    "timeRangeMillis": {
+                        "gte": int(context.attempt_started_at.timestamp() * 1000),
+                        "lte": int(checked_at.timestamp() * 1000),
+                    },
+                    "filters": [
+                        {
+                            "filterType": "traceFilter",
+                            "traceFilter": {"tags": []},
+                            "spanFilters": [{"tags": tags}],
+                        }
+                    ],
+                    "samplingFactor": 1,
+                },
+                "sectionsParameters": [{"sectionType": "traceExamples", "limit": 1}],
+            }
+            payload = self._graphql(
+                f"{self._app_base}/v2/apm/graphql",
+                "StartAnalyticsSearch",
+                _START_TRACE_QUERY,
+                {"parameters": parameters},
+                timeout_seconds,
+            )
+            field = "startAnalyticsSearch"
+        search = payload.get("data", {}).get(field, {})
+        sections = search.get("sections", []) if isinstance(search, dict) else []
+        complete = any(
+            section.get("sectionType") == "traceExamples" and section.get("isComplete") for section in sections
+        )
+        returned_job_id = search.get("jobId") if isinstance(search, dict) else None
+        if complete:
+            self._trace_jobs.pop(context.run_id, None)
+        elif returned_job_id:
+            self._trace_jobs[context.run_id] = str(returned_job_id)
+        return payload
+
+    def _graphql(
+        self,
+        url: str,
+        operation_name: str,
+        query: str,
+        variables: dict[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "POST",
+            url,
+            timeout_seconds,
+            json_body={"operationName": operation_name, "query": query, "variables": variables},
+        )
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError):
+            raise SplunkBackendError(status_code=500, transient=True) from None
+        if not isinstance(payload, dict) or payload.get("errors"):
+            raise SplunkBackendError(status_code=500, transient=True)
+        return cast(dict[str, Any], payload)
+
+    def _signalflow(
+        self,
+        program: str,
+        start: datetime,
+        stop: datetime,
+        timeout_seconds: float,
+    ) -> dict[str, float]:
+        response = self._request(
+            "POST",
+            f"{self._stream_base}/v2/signalflow/execute",
+            timeout_seconds,
+            content=program,
+            query_params={
+                "start": int(start.timestamp() * 1000),
+                "stop": int(stop.timestamp() * 1000),
+                "resolution": 1000,
+                "maxDelay": 0,
+            },
+            headers={"Content-Type": "text/plain"},
+        )
+        labels: dict[str, str] = {}
+        values: dict[str, float] = {}
+        event = ""
+        for line in response.text.splitlines():
+            if line.startswith("event:"):
+                event = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                try:
+                    payload = json.loads(line.removeprefix("data:").strip())
+                except json.JSONDecodeError:
+                    raise SplunkBackendError(status_code=500, transient=True) from None
+                if event == "metadata":
+                    label = payload.get("properties", {}).get("sf_streamLabel")
+                    if label:
+                        labels[str(payload.get("tsId"))] = str(label)
+                elif event == "data":
+                    for item in payload.get("data", []):
+                        label = labels.get(str(item.get("tsId")))
+                        value = item.get("value")
+                        if label and isinstance(value, (int, float)):
+                            values[label] = float(value)
+        return values
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        timeout_seconds: float,
+        *,
+        json_body: object | None = None,
+        content: str | None = None,
+        query_params: Mapping[str, int] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        request_headers = {"X-SF-Token": self.configuration.access_token, **(headers or {})}
+        try:
+            response = self._client.request(
+                method,
+                url,
+                headers=request_headers,
+                timeout=timeout_seconds,
+                json=json_body,
+                content=content,
+                params=query_params,
+            )
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError):
+            raise SplunkBackendError(status_code=None, transient=True) from None
+        if response.is_error:
+            retry_after = _retry_after(response.headers.get("Retry-After"))
+            transient = response.status_code in (408, 429) or response.status_code >= 500
+            raise SplunkBackendError(
+                status_code=response.status_code,
+                transient=transient,
+                retry_after_seconds=retry_after,
+            )
+        return response
+
+
+def _optional_int(value: float | None) -> int | None:
+    return None if value is None else int(value)
+
+
+def _counter_delta(opening: int | None, closing: int | None) -> int | None:
+    if opening is None or closing is None or closing < opening:
+        return None
+    return closing - opening
+
+
+def _retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 class CoreV1Api(Protocol):
@@ -112,6 +579,15 @@ class SplunkConfig:
         }
 
 
+@dataclass
+class _AttemptReliabilityState:
+    opening: ReadinessReport
+    opening_snapshot: CollectorSnapshot
+    first_visible_lag_ms: dict[SignalName, float | None]
+    queue_high_water: dict[SignalName, int | None]
+    delivery: DeliveryReport | None = None
+
+
 class SplunkObservabilityProvider:
     """Deploy the collector while keeping destination credentials out of Helm."""
 
@@ -124,12 +600,26 @@ class SplunkObservabilityProvider:
         core_api: CoreV1Api | None = None,
         run: CommandRunner | None = None,
         values_path: Path = _DEFAULT_VALUES_PATH,
+        backend: SplunkQueryBackend | None = None,
+        policy: ReliabilityPolicy | None = None,
+        now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        jitter: Callable[[float], float] | None = None,
     ) -> None:
         self.configuration = configuration
         self._core = core_api
         self._run = run or _run_command
         self._values_path = values_path
+        self._backend = backend
+        self._policy = policy or ReliabilityPolicy()
+        self._now = now or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleep or time.sleep
+        self._jitter = jitter or (lambda delay: random.uniform(0.0, min(1.0, delay * 0.2)))
         self._prepared_export: ExternalOtlpExport | None = None
+        self._connection_id: str | None = None
+        self._reliability: dict[str, _AttemptReliabilityState] = {}
         self._touched = False
         self._closed = False
 
@@ -143,6 +633,7 @@ class SplunkObservabilityProvider:
             _raise_api_error(error, "Kubernetes API preflight failed")
         except Exception:
             raise ProviderError("configuration", "Kubernetes API preflight failed") from None
+        self._connection_id = self._resolve_connection()
 
     def prepare_attempt(self, context: AttemptContext) -> ExternalOtlpExport:
         if self._closed:
@@ -201,15 +692,83 @@ class SplunkObservabilityProvider:
         return export
 
     def wait_until_queryable(self, context: AttemptContext, scope: ApplicationScope) -> ReadinessReport:
-        raise ProviderError("configuration", "Splunk readiness assurance is not implemented")
+        self._require_prepared(context)
+        connection_id = self._connection_id or self._resolve_connection()
+        self._connection_id = connection_id
+        opening, first_visible = self._poll_readiness(context, scope, connection_id, strict=True)
+        opening_snapshot = self._snapshot_with_retry(context, strict=True)
+        state = _AttemptReliabilityState(
+            opening=opening,
+            opening_snapshot=opening_snapshot,
+            first_visible_lag_ms=first_visible,
+            queue_high_water=opening_snapshot.queue_size.copy(),
+        )
+        self._reliability[context.run_id] = state
+        return opening
 
     def finish_attempt(self, context: AttemptContext, scope: ApplicationScope) -> DeliveryReport:
-        raise ProviderError("configuration", "Splunk delivery assurance is not implemented")
+        state = self._reliability.get(context.run_id)
+        if state is None:
+            raise ProviderError("configuration", "opening readiness must complete before delivery assurance")
+        if state.delivery is not None:
+            return state.delivery
+
+        connection_id = self._connection_id or self._resolve_connection()
+        closing, _ = self._poll_readiness(context, scope, connection_id, strict=False)
+        closing_snapshot = self._snapshot_with_retry(context, strict=False)
+        self._update_high_water(state.queue_high_water, closing_snapshot.queue_size)
+        final_snapshot = closing_snapshot
+        drained = self._queues_drained(final_snapshot.queue_size)
+        drain_started = self._monotonic()
+        for attempt in range(self._policy.max_attempts):
+            elapsed = self._monotonic() - drain_started
+            if drained or elapsed >= self._policy.drain_timeout_seconds:
+                break
+            if not self._sleep_before_deadline(
+                self._backoff(attempt, None), elapsed, self._policy.drain_timeout_seconds
+            ):
+                break
+            final_snapshot = self._snapshot_with_retry(context, strict=False, attempts=1)
+            self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
+            drained = self._queues_drained(final_snapshot.queue_size)
+
+        sent_delta = self._deltas(state.opening_snapshot.sent, closing_snapshot.sent)
+        failed_delta = self._deltas(state.opening_snapshot.send_failed, closing_snapshot.send_failed)
+        enqueue_delta = self._deltas(state.opening_snapshot.enqueue_failed, closing_snapshot.enqueue_failed)
+        all_counters = (*sent_delta.values(), *failed_delta.values(), *enqueue_delta.values())
+        queues_available = all(value is not None for value in state.queue_high_water.values()) and all(
+            value is not None for value in final_snapshot.queue_size.values()
+        )
+        valid = (
+            state.opening.ready
+            and closing.ready
+            and all(value is not None for value in all_counters)
+            and all(value == 0 for value in failed_delta.values())
+            and all(value == 0 for value in enqueue_delta.values())
+            and queues_available
+            and drained
+        )
+        state.delivery = DeliveryReport(
+            run_id=context.run_id,
+            opening=state.opening,
+            closing=closing,
+            first_visible_lag_ms=state.first_visible_lag_ms,
+            sent_delta=sent_delta,
+            send_failed_delta=failed_delta,
+            enqueue_failed_delta=enqueue_delta,
+            queue_high_water=state.queue_high_water,
+            queue_final_size=final_snapshot.queue_size,
+            drained=drained,
+            valid=valid,
+        )
+        return state.delivery
 
     def close(self) -> None:
         if self._closed:
             return None
         if not self._touched:
+            if self._backend is not None:
+                self._backend.close()
             self._closed = True
             return None
 
@@ -232,6 +791,9 @@ class SplunkObservabilityProvider:
         except Exception:
             cleanup_failed = True
 
+        if self._backend is not None:
+            self._backend.close()
+
         if cleanup_failed:
             raise ProviderError("cleanup", "Splunk provider cleanup failed") from None
         self._closed = True
@@ -245,6 +807,221 @@ class SplunkObservabilityProvider:
             except Exception:
                 raise ProviderError("configuration", "Kubernetes access is unavailable") from None
         return self._core
+
+    def _query_backend(self) -> SplunkQueryBackend:
+        if self._backend is None:
+            self._backend = SplunkHttpBackend(self.configuration)
+        return self._backend
+
+    def _require_prepared(self, context: AttemptContext) -> None:
+        if self._prepared_export is None or self._prepared_export.run_id != context.run_id:
+            raise ProviderError("configuration", "the Splunk provider must be prepared for this attempt")
+
+    def _resolve_connection(self) -> str:
+        started = self._monotonic()
+        for attempt in range(self._policy.max_attempts):
+            try:
+                return self._query_backend().resolve_logs_connection(self._policy.request_timeout_seconds)
+            except SplunkBackendError as error:
+                if not error.transient:
+                    self._raise_backend_error(error, None)
+                if attempt + 1 >= self._policy.max_attempts:
+                    continue
+                elapsed = self._monotonic() - started
+                if elapsed >= self._policy.readiness_timeout_seconds:
+                    break
+                if not self._sleep_before_deadline(
+                    self._backoff(attempt, error.retry_after_seconds),
+                    elapsed,
+                    self._policy.readiness_timeout_seconds,
+                ):
+                    break
+        raise ProviderError("transient_exhausted", "Splunk logs connection lookup retries were exhausted") from None
+
+    def _poll_readiness(
+        self,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        *,
+        strict: bool,
+    ) -> tuple[ReadinessReport, dict[SignalName, float | None]]:
+        started = self._monotonic()
+        readiness: dict[SignalName, SignalReadiness] = {}
+        first_visible: dict[SignalName, float | None] = dict.fromkeys(SIGNAL_NAMES)
+        last_transient = False
+        retry_after: float | None = None
+        for attempt in range(self._policy.max_attempts):
+            checked_at = self._now()
+            for signal in SIGNAL_NAMES:
+                if signal in readiness and readiness[signal].ready:
+                    continue
+                try:
+                    count = self._query_backend().query_signal(
+                        signal,
+                        context,
+                        scope,
+                        connection_id,
+                        checked_at,
+                        self._policy.request_timeout_seconds,
+                    )
+                    ready = count > 0
+                    evidence: dict[str, str | int | float | bool | None] = {
+                        "count": count,
+                        "status_class": "2xx",
+                    }
+                    if signal in ("logs", "kubernetes_events"):
+                        evidence.update(
+                            {
+                                "connection_id": connection_id,
+                                "index": self.configuration.hec_index,
+                            }
+                        )
+                    readiness[signal] = SignalReadiness(
+                        signal=signal,
+                        ready=ready,
+                        checked_at=checked_at,
+                        evidence=evidence,
+                    )
+                    if ready and first_visible[signal] is None:
+                        first_visible[signal] = max(
+                            0.0, (checked_at - context.attempt_started_at).total_seconds() * 1000
+                        )
+                except SplunkBackendError as error:
+                    last_transient = error.transient
+                    retry_after = error.retry_after_seconds
+                    failure_evidence: dict[str, str | int | float | bool | None] = {
+                        "status_class": _status_class(error.status_code)
+                    }
+                    if signal in ("logs", "kubernetes_events"):
+                        failure_evidence.update(
+                            {
+                                "connection_id": connection_id,
+                                "index": self.configuration.hec_index,
+                            }
+                        )
+                    readiness[signal] = SignalReadiness(
+                        signal=signal,
+                        ready=False,
+                        checked_at=checked_at,
+                        evidence=failure_evidence,
+                    )
+                    if not error.transient:
+                        report = self._readiness_report(context.run_id, readiness, checked_at)
+                        if strict:
+                            self._raise_backend_error(error, report)
+                        return report, first_visible
+            report = self._readiness_report(context.run_id, readiness, checked_at)
+            if report.ready:
+                return report, first_visible
+            if attempt + 1 >= self._policy.max_attempts:
+                continue
+            elapsed = self._monotonic() - started
+            if elapsed >= self._policy.readiness_timeout_seconds:
+                break
+            if not self._sleep_before_deadline(
+                self._backoff(attempt, retry_after), elapsed, self._policy.readiness_timeout_seconds
+            ):
+                break
+            retry_after = None
+
+        report = self._readiness_report(context.run_id, readiness, self._now())
+        if strict:
+            kind: FailureKind = "transient_exhausted" if last_transient else "readiness_timeout"
+            message = "Splunk query retries were exhausted" if last_transient else "Splunk telemetry was not queryable"
+            raise ProviderError(kind, message, readiness_report=report)
+        return report, first_visible
+
+    def _readiness_report(
+        self,
+        run_id: str,
+        readiness: dict[SignalName, SignalReadiness],
+        checked_at: datetime,
+    ) -> ReadinessReport:
+        signals = tuple(
+            readiness.get(
+                signal,
+                SignalReadiness(signal=signal, ready=False, checked_at=checked_at, evidence={}),
+            )
+            for signal in SIGNAL_NAMES
+        )
+        return ReadinessReport(run_id=run_id, signals=signals, ready=all(item.ready for item in signals))
+
+    def _snapshot_with_retry(
+        self,
+        context: AttemptContext,
+        *,
+        strict: bool,
+        attempts: int | None = None,
+    ) -> CollectorSnapshot:
+        limit = attempts or self._policy.max_attempts
+        started = self._monotonic()
+        for attempt in range(limit):
+            try:
+                return self._query_backend().collector_snapshot(
+                    context, self._now(), self._policy.request_timeout_seconds
+                )
+            except SplunkBackendError as error:
+                if not error.transient:
+                    if strict:
+                        self._raise_backend_error(error, None)
+                    break
+                if attempt + 1 >= limit:
+                    continue
+                elapsed = self._monotonic() - started
+                if elapsed >= self._policy.readiness_timeout_seconds:
+                    break
+                if not self._sleep_before_deadline(
+                    self._backoff(attempt, error.retry_after_seconds),
+                    elapsed,
+                    self._policy.readiness_timeout_seconds,
+                ):
+                    break
+        if strict:
+            raise ProviderError("transient_exhausted", "Splunk collector metric retries were exhausted")
+        return _unavailable_snapshot()
+
+    def _backoff(self, attempt: int, retry_after: float | None) -> float:
+        base = min(
+            self._policy.max_backoff_seconds,
+            self._policy.initial_backoff_seconds * (2**attempt),
+        )
+        if retry_after is not None:
+            base = max(base, min(retry_after, self._policy.retry_after_cap_seconds))
+        return base + max(0.0, self._jitter(base))
+
+    def _sleep_before_deadline(self, proposed: float, elapsed: float, timeout: float) -> bool:
+        remaining = max(0.0, timeout - elapsed)
+        delay = min(proposed, remaining)
+        self._sleep(delay)
+        return proposed < remaining
+
+    @staticmethod
+    def _raise_backend_error(error: SplunkBackendError, report: ReadinessReport | None) -> NoReturn:
+        if error.status_code == 401:
+            kind: FailureKind = "authentication"
+        elif error.status_code == 403:
+            kind = "permission"
+        else:
+            kind = "configuration"
+        raise ProviderError(kind, "Splunk query request was rejected", readiness_report=report) from None
+
+    @staticmethod
+    def _deltas(
+        opening: dict[SignalName, int | None], closing: dict[SignalName, int | None]
+    ) -> dict[SignalName, int | None]:
+        return {signal: _counter_delta(opening[signal], closing[signal]) for signal in SIGNAL_NAMES}
+
+    @staticmethod
+    def _update_high_water(high_water: dict[SignalName, int | None], sample: dict[SignalName, int | None]) -> None:
+        for signal in SIGNAL_NAMES:
+            current = high_water[signal]
+            value = sample[signal]
+            high_water[signal] = None if current is None or value is None else max(current, value)
+
+    @staticmethod
+    def _queues_drained(queue_size: dict[SignalName, int | None]) -> bool:
+        return all(value == 0 for value in queue_size.values())
 
     def _ensure_namespace(self) -> None:
         body = client.V1Namespace(metadata=client.V1ObjectMeta(name=NAMESPACE))
@@ -299,6 +1076,20 @@ def _run_command(command: list[str], stdin: str | None) -> subprocess.CompletedP
     return subprocess.run(command, input=stdin, capture_output=True, text=True, check=False)
 
 
+def _status_class(status_code: int | None) -> str:
+    return "transport" if status_code is None else f"{status_code // 100}xx"
+
+
+def _unavailable_snapshot() -> CollectorSnapshot:
+    unavailable: dict[SignalName, int | None] = dict.fromkeys(SIGNAL_NAMES)
+    return CollectorSnapshot(
+        sent=unavailable.copy(),
+        send_failed=unavailable.copy(),
+        enqueue_failed=unavailable.copy(),
+        queue_size=unavailable.copy(),
+    )
+
+
 def _raise_api_error(error: ApiException, safe_message: str) -> NoReturn:
     if error.status == 401:
         kind: FailureKind = "authentication"
@@ -314,6 +1105,10 @@ __all__ = [
     "NAMESPACE",
     "RELEASE_NAME",
     "SECRET_NAME",
+    "CollectorSnapshot",
+    "ReliabilityPolicy",
+    "SplunkBackendError",
     "SplunkConfig",
+    "SplunkHttpBackend",
     "SplunkObservabilityProvider",
 ]

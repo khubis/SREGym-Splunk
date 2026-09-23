@@ -1,9 +1,10 @@
 import json
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
+import httpx
 import pytest
 import yaml
 from kubernetes.client.rest import ApiException
@@ -16,7 +17,11 @@ from sregym.observability.splunk import (
     NAMESPACE,
     RELEASE_NAME,
     SECRET_NAME,
+    CollectorSnapshot,
+    ReliabilityPolicy,
+    SplunkBackendError,
     SplunkConfig,
+    SplunkHttpBackend,
     SplunkObservabilityProvider,
 )
 
@@ -24,6 +29,7 @@ RUN_ID = "anon_0123456789abcdef0123456789abcdef"
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
 ACCESS_TOKEN = "access-token-value"
 HEC_TOKEN = "hec-token-value"
+SIGNALS = ("metrics", "traces", "logs", "kubernetes_events")
 
 
 def valid_environment(**overrides: str) -> dict[str, str]:
@@ -44,6 +50,108 @@ def attempt_context() -> AttemptContext:
 
 def successful_command(command: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+
+def snapshot(
+    *,
+    sent: int | None = 10,
+    failed: int | None = 0,
+    enqueue_failed: int | None = 0,
+    queue: int | None = 0,
+) -> CollectorSnapshot:
+    return CollectorSnapshot(
+        sent=dict.fromkeys(SIGNALS, sent),
+        send_failed=dict.fromkeys(SIGNALS, failed),
+        enqueue_failed=dict.fromkeys(SIGNALS, enqueue_failed),
+        queue_size=dict.fromkeys(SIGNALS, queue),
+    )
+
+
+class FakeBackend:
+    def __init__(self) -> None:
+        self.connection_id = "connection-default"
+        self.connection_outcomes: list[str | Exception] = []
+        self.query_outcomes: dict[str, list[int | Exception]] = {signal: [] for signal in SIGNALS}
+        self.snapshot_outcomes: list[CollectorSnapshot | Exception] = []
+        self.query_calls: list[tuple[str, str, tuple[str, ...], str]] = []
+        self.snapshot_calls: list[str] = []
+        self.connection_calls = 0
+        self.closed = False
+
+    def resolve_logs_connection(self, timeout_seconds: float) -> str:
+        self.connection_calls += 1
+        outcome = self.connection_outcomes.pop(0) if self.connection_outcomes else self.connection_id
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def query_signal(
+        self,
+        signal: str,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int:
+        self.query_calls.append((signal, context.run_id, scope.namespaces, connection_id))
+        outcomes = self.query_outcomes[signal]
+        outcome = outcomes.pop(0) if outcomes else 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def collector_snapshot(
+        self,
+        context: AttemptContext,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> CollectorSnapshot:
+        self.snapshot_calls.append(context.run_id)
+        outcome = self.snapshot_outcomes.pop(0) if self.snapshot_outcomes else snapshot()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def reliability_policy(**overrides: float | int) -> ReliabilityPolicy:
+    values = {
+        "readiness_timeout_seconds": 30.0,
+        "drain_timeout_seconds": 20.0,
+        "request_timeout_seconds": 2.0,
+        "max_attempts": 3,
+        "initial_backoff_seconds": 1.0,
+        "max_backoff_seconds": 4.0,
+        "retry_after_cap_seconds": 3.0,
+    }
+    values.update(overrides)
+    return ReliabilityPolicy(**values)
+
+
+def prepared_provider(
+    backend: FakeBackend,
+    *,
+    policy: ReliabilityPolicy | None = None,
+    now: datetime = NOW + timedelta(seconds=5),
+    sleep: Mock | None = None,
+    monotonic: Mock | None = None,
+) -> SplunkObservabilityProvider:
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+        policy=policy or reliability_policy(),
+        now=lambda: now,
+        monotonic=monotonic or Mock(return_value=0.0),
+        sleep=sleep or Mock(),
+        jitter=lambda delay: 0.0,
+    )
+    provider.prepare_attempt(attempt_context())
+    return provider
 
 
 @pytest.mark.parametrize(
@@ -227,7 +335,9 @@ def test_preflight_checks_helm_without_persisting_credentials():
         commands.append((command, stdin))
         return successful_command(command, stdin)
 
-    provider = SplunkObservabilityProvider(SplunkConfig.from_env(valid_environment()), core_api=Mock(), run=run)
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()), core_api=Mock(), run=run, backend=FakeBackend()
+    )
 
     assert provider.preflight() is None
     assert commands == [(["helm", "version", "--short"], None)]
@@ -272,7 +382,9 @@ def test_preflight_rejects_a_missing_values_file(tmp_path):
 def test_default_command_runner_uses_safe_subprocess_arguments(monkeypatch):
     run = Mock(return_value=subprocess.CompletedProcess(["helm"], 0, stdout="ok", stderr=""))
     monkeypatch.setattr(splunk_module.subprocess, "run", run)
-    provider = SplunkObservabilityProvider(SplunkConfig.from_env(valid_environment()), core_api=Mock())
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()), core_api=Mock(), backend=FakeBackend()
+    )
 
     provider.preflight()
 
@@ -466,17 +578,989 @@ def test_a_new_attempt_reconfigures_the_same_idempotent_release():
     assert len(commands) == 2
 
 
-def test_prepare_after_close_and_task_f_methods_fail_safely():
+def test_prepare_after_close_and_unprepared_assurance_methods_fail_safely():
     provider = SplunkObservabilityProvider(
-        SplunkConfig.from_env(valid_environment()), core_api=Mock(), run=successful_command
+        SplunkConfig.from_env(valid_environment()), core_api=Mock(), run=successful_command, backend=FakeBackend()
     )
     context = attempt_context()
     scope = ApplicationScope("social-network", ("social-network",))
 
-    with pytest.raises(ProviderError, match="readiness assurance"):
+    with pytest.raises(ProviderError, match="prepared"):
         provider.wait_until_queryable(context, scope)
-    with pytest.raises(ProviderError, match="delivery assurance"):
+    with pytest.raises(ProviderError, match="opening readiness"):
         provider.finish_attempt(context, scope)
     provider.close()
     with pytest.raises(ProviderError, match="already closed"):
         provider.prepare_attempt(context)
+
+
+@pytest.mark.parametrize(
+    "connections,expected",
+    (
+        (
+            [
+                {
+                    "connectionID": "first",
+                    "connectionName": "first",
+                    "isDefaultConnection": False,
+                    "isAccessible": True,
+                },
+                {
+                    "connectionID": "default",
+                    "connectionName": "default",
+                    "isDefaultConnection": True,
+                    "isAccessible": True,
+                },
+            ],
+            "default",
+        ),
+        (
+            [
+                {
+                    "connectionID": "inaccessible-default",
+                    "connectionName": "default",
+                    "isDefaultConnection": True,
+                    "isAccessible": False,
+                },
+                {
+                    "connectionID": "fallback",
+                    "connectionName": "fallback",
+                    "isDefaultConnection": False,
+                    "isAccessible": True,
+                },
+            ],
+            "fallback",
+        ),
+    ),
+)
+def test_http_backend_selects_accessible_default_then_first_accessible(connections, expected):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": {"getConnections": connections}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    backend = SplunkHttpBackend(SplunkConfig.from_env(valid_environment()), http_client=client)
+
+    assert backend.resolve_logs_connection(2.0) == expected
+    payload = json.loads(requests[0].content)
+    assert requests[0].url == "https://app.us0.signalfx.com/v2/logs/graphql"
+    assert payload["operationName"] == "getConnections"
+    assert requests[0].headers["x-sf-token"] == ACCESS_TOKEN
+    backend.close()
+
+
+def test_http_backend_rejects_missing_accessible_logs_connection():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"getConnections": []}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0)
+
+    assert raised.value.status_code == 400
+    assert raised.value.transient is False
+
+
+def test_http_backend_queries_all_four_signals_with_run_and_namespace_scope():
+    requests: list[tuple[str, dict | None, str]] = []
+    log_jobs = iter(("log-job", "event-job"))
+    sse = "\n".join(
+        (
+            "event: metadata",
+            'data: {"tsId":"metric","properties":{"sf_streamLabel":"readiness"}}',
+            "",
+            "event: data",
+            'data: {"logicalTimestampMs":1,"data":[{"tsId":"metric","value":2}]}',
+            "",
+            "event: control-message",
+            'data: {"event":"END_OF_CHANNEL","timestampMs":1}',
+            "",
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/signalflow/execute":
+            requests.append(("signalflow", None, request.content.decode()))
+            return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+        payload = json.loads(request.content)
+        operation = payload["operationName"]
+        requests.append((operation, payload, ""))
+        if operation == "StartAnalyticsSearch":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "startAnalyticsSearch": {
+                            "sections": [
+                                {
+                                    "sectionType": "traceExamples",
+                                    "isComplete": True,
+                                    "traceExamples": [{"traceId": "trace-1"}],
+                                }
+                            ]
+                        }
+                    }
+                },
+            )
+        if operation == "createSearchJob":
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": next(log_jobs), "status": "RUNNING"}}})
+        if operation == "searchJobResultsWithoutFieldsSummary":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "searchJob": {
+                            "status": "DONE",
+                            "results": {"results": [["one result"]]},
+                        }
+                    }
+                },
+            )
+        raise AssertionError(operation)
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    context = attempt_context()
+    scope = ApplicationScope("social-network", ("social-network", "observe"))
+    checked_at = NOW + timedelta(minutes=1)
+
+    counts = {
+        signal: backend.query_signal(signal, context, scope, "connection-default", checked_at, 2.0)
+        for signal in SIGNALS
+    }
+
+    assert counts == dict.fromkeys(SIGNALS, 1) | {"metrics": 2}
+    signalflow_program = next(content for operation, _, content in requests if operation == "signalflow")
+    assert RUN_ID in signalflow_program
+    assert "social-network" in signalflow_program
+    trace_payload = next(payload for operation, payload, _ in requests if operation == "StartAnalyticsSearch")
+    assert trace_payload is not None
+    assert RUN_ID in json.dumps(trace_payload)
+    assert "social-network" in json.dumps(trace_payload)
+    assert trace_payload["variables"]["parameters"]["sectionsParameters"] == [
+        {"sectionType": "traceExamples", "limit": 1}
+    ]
+    log_payloads = [
+        payload for operation, payload, _ in requests if operation == "createSearchJob" and payload is not None
+    ]
+    log_queries = [payload["variables"]["query"] for payload in log_payloads]
+    assert all(RUN_ID in query and "social-network" in query for query in log_queries)
+    assert "k8s.container.name=*" in log_queries[0]
+    assert "k8s.event.reason=*" in log_queries[1]
+    assert all(payload["variables"]["queryType"] == "SPL1" for payload in log_payloads)
+    assert all(payload["variables"]["connectionID"] == "connection-default" for payload in log_payloads)
+    assert all(payload["variables"]["queryParameters"]["timezone"] == "UTC" for payload in log_payloads)
+
+
+@pytest.mark.parametrize(
+    "status,retry_after,transient",
+    (
+        (400, None, False),
+        (401, None, False),
+        (403, None, False),
+        (408, None, True),
+        (429, "99", True),
+        (503, None, True),
+    ),
+)
+def test_http_backend_classifies_http_status_without_response_body_leaks(status, retry_after, transient):
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers=headers, text=f"{ACCESS_TOKEN} {HEC_TOKEN}")
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0)
+
+    assert raised.value.status_code == status
+    assert raised.value.transient is transient
+    assert raised.value.retry_after_seconds == (99.0 if retry_after else None)
+    assert ACCESS_TOKEN not in str(raised.value)
+    assert HEC_TOKEN not in str(raised.value)
+
+
+def test_http_backend_classifies_transport_timeout_as_transient():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout(f"{ACCESS_TOKEN} {HEC_TOKEN}", request=request)
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0)
+
+    assert raised.value.status_code is None
+    assert raised.value.transient is True
+    assert ACCESS_TOKEN not in str(raised.value)
+
+
+def test_wait_until_queryable_records_all_signals_scope_and_first_visible_lag():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(queue=2)]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+
+    report = provider.wait_until_queryable(attempt_context(), scope)
+
+    assert report.ready is True
+    assert tuple(signal.signal for signal in report.signals) == SIGNALS
+    assert all(signal.evidence["count"] == 1 for signal in report.signals)
+    assert all(signal.evidence["status_class"] == "2xx" for signal in report.signals)
+    for signal in report.signals:
+        if signal.signal in ("logs", "kubernetes_events"):
+            assert signal.evidence["connection_id"] == "connection-default"
+            assert signal.evidence["index"] == "main"
+        else:
+            assert "connection_id" not in signal.evidence
+    assert all(call[1:] == (RUN_ID, ("social-network",), "connection-default") for call in backend.query_calls)
+    assert backend.snapshot_calls == [RUN_ID]
+
+
+@pytest.mark.parametrize("status", (None, 408, 429, 500, 503))
+def test_readiness_retries_transient_failures_with_bounded_backoff(status):
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [
+        SplunkBackendError(
+            status_code=status,
+            transient=True,
+            retry_after_seconds=99.0 if status == 429 else None,
+        ),
+        1,
+    ]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+
+    report = provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert report.ready is True
+    expected_delay = 3.0 if status == 429 else 1.0
+    sleep.assert_called_once_with(expected_delay)
+    assert [call[0] for call in backend.query_calls].count("metrics") == 2
+    assert [call[0] for call in backend.query_calls].count("traces") == 1
+
+
+@pytest.mark.parametrize("status,kind", ((400, "configuration"), (401, "authentication"), (403, "permission")))
+def test_readiness_fails_fast_for_terminal_http_errors(status, kind):
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [SplunkBackendError(status_code=status, transient=False)]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == kind
+    sleep.assert_not_called()
+    assert [call[0] for call in backend.query_calls] == ["metrics"]
+
+
+def test_readiness_classifies_transient_exhaustion_with_partial_report():
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [
+        SplunkBackendError(status_code=503, transient=True),
+        SplunkBackendError(status_code=503, transient=True),
+    ]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=2))
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "transient_exhausted"
+    assert raised.value.readiness_report is not None
+    assert raised.value.readiness_report.ready is False
+    assert next(item for item in raised.value.readiness_report.signals if item.signal == "metrics").ready is False
+
+
+def test_readiness_failure_evidence_identifies_the_safe_logs_destination():
+    backend = FakeBackend()
+    backend.query_outcomes["logs"] = [SplunkBackendError(status_code=503, transient=True)]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=1))
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.readiness_report is not None
+    logs = next(item for item in raised.value.readiness_report.signals if item.signal == "logs")
+    assert logs.evidence == {
+        "status_class": "5xx",
+        "connection_id": "connection-default",
+        "index": "main",
+    }
+
+
+def test_readiness_classifies_empty_results_as_timeout():
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [0, 0]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=2))
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "readiness_timeout"
+    assert raised.value.readiness_report is not None
+
+
+def test_finish_attempt_reports_counter_deltas_high_water_and_queue_drain():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [
+        snapshot(sent=10, queue=2),
+        snapshot(sent=15, queue=1),
+        snapshot(sent=15, queue=0),
+    ]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.opening.ready is True
+    assert delivery.closing.ready is True
+    assert delivery.first_visible_lag_ms == dict.fromkeys(SIGNALS, 5000.0)
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 5)
+    assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, 0)
+    assert delivery.enqueue_failed_delta == dict.fromkeys(SIGNALS, 0)
+    assert delivery.queue_high_water == dict.fromkeys(SIGNALS, 2)
+    assert delivery.queue_final_size == dict.fromkeys(SIGNALS, 0)
+    assert delivery.drained is True
+    assert delivery.valid is True
+    sleep.assert_called_once_with(1.0)
+    assert provider.finish_attempt(attempt_context(), scope) is delivery
+
+
+@pytest.mark.parametrize("invalid_case", ("missing_counter", "send_failure", "enqueue_failure", "undrained"))
+def test_finish_attempt_invalidates_missing_failures_and_undrained_queues(invalid_case):
+    backend = FakeBackend()
+    opening = snapshot(sent=None) if invalid_case == "missing_counter" else snapshot()
+    if invalid_case == "send_failure":
+        closing = snapshot(failed=1)
+    elif invalid_case == "enqueue_failure":
+        closing = snapshot(enqueue_failed=1)
+    elif invalid_case == "undrained":
+        opening = snapshot(queue=1)
+        closing = snapshot(queue=2)
+    else:
+        closing = snapshot(sent=None)
+    backend.snapshot_outcomes = [opening, closing, closing]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=1))
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is False
+    if invalid_case == "undrained":
+        assert delivery.drained is False
+        assert delivery.queue_high_water == dict.fromkeys(SIGNALS, 2)
+        assert delivery.queue_final_size == dict.fromkeys(SIGNALS, 2)
+    elif invalid_case == "missing_counter":
+        assert delivery.sent_delta == dict.fromkeys(SIGNALS, None)
+    elif invalid_case == "send_failure":
+        assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, 1)
+    else:
+        assert delivery.enqueue_failed_delta == dict.fromkeys(SIGNALS, 1)
+
+
+def test_finish_attempt_preserves_invalid_report_when_closing_signal_is_missing():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(), snapshot()]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=1))
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+    backend.query_outcomes["logs"] = [0]
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.closing.ready is False
+    assert delivery.valid is False
+
+
+def test_finish_attempt_fails_fast_to_an_invalid_report_for_terminal_closing_query():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(), snapshot()]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+    backend.query_outcomes["logs"] = [SplunkBackendError(status_code=403, transient=False)]
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.closing.ready is False
+    assert delivery.valid is False
+    assert [call[0] for call in backend.query_calls].count("logs") == 2
+    sleep.assert_not_called()
+
+
+def test_delivery_evidence_and_backend_errors_never_serialize_supplied_secrets():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(), snapshot()]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+    encoded = json.dumps(serialize_provider_artifact(delivery), sort_keys=True)
+    error_text = repr(SplunkBackendError(status_code=500, transient=True))
+
+    assert ACCESS_TOKEN not in encoded + error_text
+    assert HEC_TOKEN not in encoded + error_text
+
+
+@pytest.mark.parametrize(
+    "overrides,message",
+    (
+        ({"max_attempts": 0}, "positive"),
+        ({"request_timeout_seconds": 0.0}, "positive"),
+        ({"initial_backoff_seconds": 2.0, "max_backoff_seconds": 1.0}, "maximum backoff"),
+    ),
+)
+def test_reliability_policy_rejects_invalid_bounds(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        reliability_policy(**overrides)
+
+
+def test_http_backend_reads_collector_counters_and_preserves_missing_values():
+    labels = {
+        "sent_metrics": 5,
+        "sent_traces": 4,
+        "sent_logs": 3,
+        "failed_metrics": 0,
+        "failed_traces": 1,
+        "failed_logs": 0,
+        "enqueue_metrics": 0,
+        "enqueue_traces": 0,
+        "queue_metrics": 2,
+        "queue_traces": 1,
+        "queue_logs": 0,
+    }
+    lines: list[str] = []
+    for position, (label, value) in enumerate(labels.items()):
+        lines.extend(
+            (
+                "event: metadata",
+                f'data: {{"tsId":"{position}","properties":{{"sf_streamLabel":"{label}"}}}}',
+                "",
+                "event: data",
+                f'data: {{"data":[{{"tsId":"{position}","value":{value}}}]}}',
+                "",
+            )
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert RUN_ID in request.content.decode()
+        return httpx.Response(200, text="\n".join(lines))
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=1), 2.0)
+
+    assert result.sent == {"metrics": 5, "traces": 4, "logs": 3, "kubernetes_events": 3}
+    assert result.send_failed == {"metrics": 0, "traces": 1, "logs": 0, "kubernetes_events": 0}
+    assert result.enqueue_failed == {
+        "metrics": 0,
+        "traces": 0,
+        "logs": None,
+        "kubernetes_events": None,
+    }
+    assert result.queue_size == {"metrics": 2, "traces": 1, "logs": 0, "kubernetes_events": 0}
+
+
+def test_http_backend_closes_only_its_owned_client(monkeypatch):
+    client = Mock()
+    monkeypatch.setattr(splunk_module.httpx, "Client", Mock(return_value=client))
+
+    backend = SplunkHttpBackend(SplunkConfig.from_env(valid_environment()))
+    backend.close()
+
+    client.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        httpx.Response(200, text="not-json"),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"errors": [{"message": ACCESS_TOKEN}]}),
+    ),
+)
+def test_http_backend_rejects_malformed_graphql_without_leaking_payload(response):
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: response)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0)
+
+    assert raised.value.transient is True
+    assert ACCESS_TOKEN not in str(raised.value)
+
+
+def test_http_backend_rejects_log_jobs_without_an_identifier():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"createSearchJob": {"status": "RUNNING"}}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.query_signal(
+            "logs",
+            attempt_context(),
+            ApplicationScope("social-network", ("social-network",)),
+            "connection-default",
+            NOW,
+            2.0,
+        )
+
+    assert raised.value.transient is True
+
+
+def test_http_backend_continues_existing_log_job_until_complete():
+    operations: list[str] = []
+    results = iter(
+        (
+            {"data": {"searchJob": {"status": "RUNNING", "results": {"results": []}}}},
+            {"data": {"searchJob": {"status": "DONE", "results": {"results": [["row"]]}}}},
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = json.loads(request.content)["operationName"]
+        operations.append(operation)
+        if operation == "createSearchJob":
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": "job-1"}}})
+        return httpx.Response(200, json=next(results))
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    arguments = (
+        "logs",
+        attempt_context(),
+        ApplicationScope("social-network", ("social-network",)),
+        "connection-default",
+        NOW,
+        2.0,
+    )
+
+    assert backend.query_signal(*arguments) == 0
+    assert backend.query_signal(*arguments) == 1
+    assert operations == [
+        "createSearchJob",
+        "searchJobResultsWithoutFieldsSummary",
+        "searchJobResultsWithoutFieldsSummary",
+    ]
+
+
+def test_http_backend_continues_existing_trace_job_until_complete():
+    operations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = json.loads(request.content)["operationName"]
+        operations.append(operation)
+        if operation == "StartAnalyticsSearch":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "startAnalyticsSearch": {
+                            "jobId": "trace-job",
+                            "sections": [{"sectionType": "traceExamples", "isComplete": False}],
+                        }
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "getAnalyticsSearch": {
+                        "sections": [
+                            {
+                                "sectionType": "traceExamples",
+                                "isComplete": True,
+                                "data": {"traceExamples": [{"traceId": "trace-1"}]},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    arguments = (
+        "traces",
+        attempt_context(),
+        ApplicationScope("social-network", ("social-network",)),
+        "connection-default",
+        NOW,
+        2.0,
+    )
+
+    assert backend.query_signal(*arguments) == 0
+    assert backend.query_signal(*arguments) == 1
+    assert operations == ["StartAnalyticsSearch", "GetAnalyticsSearch"]
+
+
+def test_http_backend_restarts_incomplete_trace_response_without_job_id():
+    operations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operations.append(json.loads(request.content)["operationName"])
+        return httpx.Response(
+            200,
+            json={
+                "data": {"startAnalyticsSearch": {"sections": [{"sectionType": "traceExamples", "isComplete": False}]}}
+            },
+        )
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    arguments = (
+        "traces",
+        attempt_context(),
+        ApplicationScope("social-network", ("social-network",)),
+        "connection-default",
+        NOW,
+        2.0,
+    )
+
+    assert backend.query_signal(*arguments) == 0
+    assert backend.query_signal(*arguments) == 0
+    assert operations == ["StartAnalyticsSearch", "StartAnalyticsSearch"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "event: data\ndata: not-json\n",
+        'event: metadata\ndata: {"tsId":"orphan","properties":{}}\n',
+        'event: data\ndata: {"data":[{"tsId":"orphan","value":"not-number"}]}\n',
+    ),
+)
+def test_http_backend_handles_incomplete_or_malformed_signalflow_frames(body):
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, text=body))),
+    )
+
+    if "not-json" in body and body.startswith("event: data\ndata: not-json"):
+        with pytest.raises(SplunkBackendError):
+            backend.collector_snapshot(attempt_context(), NOW, 2.0)
+    else:
+        assert backend.collector_snapshot(attempt_context(), NOW, 2.0) == snapshot(
+            sent=None, failed=None, enqueue_failed=None, queue=None
+        )
+
+
+@pytest.mark.parametrize("retry_after,expected", (("invalid", None), ("-5", 0.0)))
+def test_http_backend_safely_parses_retry_after(retry_after, expected):
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(429, headers={"Retry-After": retry_after}))
+        ),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0)
+
+    assert raised.value.retry_after_seconds == expected
+
+
+def test_preflight_retries_transient_connection_lookup_and_closes_backend():
+    backend = FakeBackend()
+    backend.connection_outcomes = [SplunkBackendError(status_code=503, transient=True), "connection-fallback"]
+    sleep = Mock()
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+        policy=reliability_policy(),
+        monotonic=Mock(return_value=0.0),
+        sleep=sleep,
+        jitter=lambda delay: 0.0,
+    )
+
+    provider.preflight()
+    provider.close()
+
+    assert backend.connection_calls == 2
+    sleep.assert_called_once_with(1.0)
+    assert backend.closed is True
+
+
+@pytest.mark.parametrize("status,kind", ((400, "configuration"), (401, "authentication"), (403, "permission")))
+def test_preflight_fails_fast_for_terminal_connection_errors(status, kind):
+    backend = FakeBackend()
+    backend.connection_outcomes = [SplunkBackendError(status_code=status, transient=False)]
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.preflight()
+
+    assert raised.value.kind == kind
+
+
+def test_preflight_exhausts_transient_connection_retries_at_deadline():
+    backend = FakeBackend()
+    backend.connection_outcomes = [SplunkBackendError(status_code=503, transient=True)]
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+        policy=reliability_policy(),
+        monotonic=Mock(side_effect=(0.0, 31.0)),
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.preflight()
+
+    assert raised.value.kind == "transient_exhausted"
+    assert backend.connection_calls == 1
+
+
+def test_readiness_stops_at_overall_deadline():
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [0]
+    provider = prepared_provider(
+        backend,
+        monotonic=Mock(side_effect=(0.0, 0.0, 31.0)),
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "readiness_timeout"
+    assert [call[0] for call in backend.query_calls].count("metrics") == 1
+
+
+def test_readiness_caps_backoff_at_remaining_deadline_without_an_extra_query():
+    backend = FakeBackend()
+    backend.query_outcomes["metrics"] = [0, 1]
+    sleep = Mock()
+    provider = prepared_provider(
+        backend,
+        policy=reliability_policy(
+            readiness_timeout_seconds=3.0,
+            initial_backoff_seconds=10.0,
+            max_backoff_seconds=10.0,
+        ),
+        sleep=sleep,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "readiness_timeout"
+    sleep.assert_called_once_with(3.0)
+    assert [call[0] for call in backend.query_calls].count("metrics") == 1
+
+
+@pytest.mark.parametrize("strict_error", (False, True))
+def test_collector_snapshot_failures_are_invalid_after_execution_and_fatal_before(strict_error):
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=503, transient=True)]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=1))
+    scope = ApplicationScope("social-network", ("social-network",))
+
+    if strict_error:
+        with pytest.raises(ProviderError) as raised:
+            provider.wait_until_queryable(attempt_context(), scope)
+        assert raised.value.kind == "transient_exhausted"
+    else:
+        backend.snapshot_outcomes = [snapshot(), SplunkBackendError(status_code=400, transient=False)]
+        provider.wait_until_queryable(attempt_context(), scope)
+        delivery = provider.finish_attempt(attempt_context(), scope)
+        assert delivery.valid is False
+        assert delivery.sent_delta == dict.fromkeys(SIGNALS)
+        assert delivery.queue_final_size == dict.fromkeys(SIGNALS, 0)
+
+
+def test_touched_provider_closes_injected_backend_after_cleanup():
+    backend = FakeBackend()
+    provider = prepared_provider(backend)
+
+    provider.close()
+
+    assert backend.closed is True
+
+
+def test_query_backend_is_created_lazily(monkeypatch):
+    backend = FakeBackend()
+    constructor = Mock(return_value=backend)
+    monkeypatch.setattr(splunk_module, "SplunkHttpBackend", constructor)
+    config = SplunkConfig.from_env(valid_environment())
+    provider = SplunkObservabilityProvider(config, core_api=Mock(), run=successful_command)
+
+    assert provider._query_backend() is backend
+    assert provider._query_backend() is backend
+    constructor.assert_called_once_with(config)
+
+
+def test_preflight_exhausts_transient_connection_attempt_limit():
+    backend = FakeBackend()
+    backend.connection_outcomes = [SplunkBackendError(status_code=503, transient=True)]
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+        policy=reliability_policy(max_attempts=1),
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.preflight()
+
+    assert raised.value.kind == "transient_exhausted"
+    assert backend.connection_calls == 1
+
+
+def test_preflight_caps_connection_backoff_at_remaining_deadline():
+    backend = FakeBackend()
+    backend.connection_outcomes = [
+        SplunkBackendError(status_code=503, transient=True),
+        "must-not-be-queried",
+    ]
+    sleep = Mock()
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+        policy=reliability_policy(
+            readiness_timeout_seconds=3.0,
+            initial_backoff_seconds=10.0,
+            max_backoff_seconds=10.0,
+        ),
+        monotonic=Mock(return_value=0.0),
+        sleep=sleep,
+        jitter=lambda delay: 0.0,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.preflight()
+
+    assert raised.value.kind == "transient_exhausted"
+    sleep.assert_called_once_with(3.0)
+    assert backend.connection_calls == 1
+
+
+@pytest.mark.parametrize("status,kind", ((400, "configuration"), (401, "authentication"), (403, "permission")))
+def test_opening_collector_snapshot_fails_fast_for_terminal_errors(status, kind):
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=status, transient=False)]
+    provider = prepared_provider(backend)
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == kind
+
+
+def test_opening_collector_snapshot_retries_transient_errors():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=503, transient=True), snapshot()]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+
+    report = provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert report.ready is True
+    sleep.assert_called_once_with(1.0)
+
+
+def test_opening_collector_snapshot_stops_retrying_at_deadline():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=503, transient=True)]
+    provider = prepared_provider(
+        backend,
+        monotonic=Mock(side_effect=(0.0, 0.0, 0.0, 31.0)),
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "transient_exhausted"
+    assert backend.snapshot_calls == [RUN_ID]
+
+
+def test_opening_collector_snapshot_caps_backoff_at_remaining_deadline():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=503, transient=True), snapshot()]
+    sleep = Mock()
+    provider = prepared_provider(
+        backend,
+        policy=reliability_policy(
+            readiness_timeout_seconds=3.0,
+            initial_backoff_seconds=10.0,
+            max_backoff_seconds=10.0,
+        ),
+        sleep=sleep,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.wait_until_queryable(attempt_context(), ApplicationScope("social-network", ("social-network",)))
+
+    assert raised.value.kind == "transient_exhausted"
+    sleep.assert_called_once_with(3.0)
+    assert backend.snapshot_calls == [RUN_ID]
+
+
+def test_queue_drain_caps_backoff_at_remaining_deadline():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(queue=1), snapshot(queue=2), snapshot(queue=0)]
+    sleep = Mock()
+    provider = prepared_provider(
+        backend,
+        policy=reliability_policy(
+            drain_timeout_seconds=3.0,
+            initial_backoff_seconds=10.0,
+            max_backoff_seconds=10.0,
+        ),
+        sleep=sleep,
+    )
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.drained is False
+    assert delivery.queue_final_size == dict.fromkeys(SIGNALS, 2)
+    sleep.assert_called_once_with(3.0)
+    assert backend.snapshot_calls == [RUN_ID, RUN_ID]
