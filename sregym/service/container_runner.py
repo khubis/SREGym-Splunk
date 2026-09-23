@@ -107,6 +107,8 @@ class ContainerConfig:
     image: str = field(default_factory=lambda: os.environ.get("SREGYM_AGENT_IMAGE") or DEFAULT_AGENT_IMAGE)
     network_mode: str = "host"
     kubeconfig_path: Path | None = None
+    kubernetes_access: bool = True
+    sregym_mcp_access: bool = True
     workspace_path: Path | None = None  # bind-mounted to /workspace for agent output
     logs_path: Path | None = None
     sregym_apps_path: Path | None = None
@@ -313,9 +315,15 @@ class ContainerRunner:
     def _configured_egress_rules(self, env_vars: dict[str, str]) -> tuple[EndpointRule, ...]:
         rules = {
             EndpointRule("host.docker.internal", int(env_vars.get("API_PORT", "8000")), inspect_tools=False),
-            EndpointRule("host.docker.internal", self.config.k8s_proxy_port, inspect_tools=False),
-            EndpointRule("host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False),
         }
+        if self.config.kubernetes_access:
+            rules.add(EndpointRule("host.docker.internal", self.config.k8s_proxy_port, inspect_tools=False))
+        if self.config.sregym_mcp_access:
+            rules.add(
+                EndpointRule(
+                    "host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False
+                )
+            )
         rules.update(
             provider_endpoint_rules(
                 self.config.internet_policy,
@@ -458,6 +466,12 @@ class ContainerRunner:
         if self.config.internet_policy.agent_name == "codex" and env_vars.get("AGENT_API_BASE"):
             env_vars.setdefault("CODEX_HOME", "/logs")
 
+        if not self.config.kubernetes_access:
+            env_vars.pop("KUBECONFIG", None)
+        if not self.config.sregym_mcp_access:
+            env_vars.pop("MCP_SERVER_PORT", None)
+            env_vars.pop("MCP_SERVER_URL", None)
+
         # The judge runs on the host. Its model and credentials are not inputs
         # to the evaluated agent and must not enter the agent container.
         for name in ("JUDGE_MODEL_ID", "JUDGE_API_BASE", "JUDGE_API_KEY"):
@@ -485,8 +499,9 @@ class ContainerRunner:
         # running on the host, including the MCP port-forward.
         if self.config.network_mode == "host" or self.config.internet_policy.is_filtered:
             env_vars["API_HOSTNAME"] = "host.docker.internal"
-            mcp_port = env_vars.get("MCP_SERVER_PORT", os.environ.get("MCP_SERVER_PORT", "9954"))
-            env_vars["MCP_SERVER_URL"] = f"http://host.docker.internal:{mcp_port}"
+            if self.config.sregym_mcp_access:
+                mcp_port = env_vars.get("MCP_SERVER_PORT", os.environ.get("MCP_SERVER_PORT", "9954"))
+                env_vars["MCP_SERVER_URL"] = f"http://host.docker.internal:{mcp_port}"
 
         if self._agent_tools_volume is not None:
             env_vars["PATH"] = CONTAINER_PATH
@@ -536,7 +551,7 @@ class ContainerRunner:
             args.extend(["-v", f"{self._agent_tools_volume}:{AGENT_TOOLS_CONTAINER_PATH}:ro"])
 
         # Mount kubeconfig (read-only)
-        if self.config.kubeconfig_path and self.config.kubeconfig_path.exists():
+        if self.config.kubernetes_access and self.config.kubeconfig_path and self.config.kubeconfig_path.exists():
             kubeconfig_path = self._prepare_kubeconfig(self.config.kubeconfig_path)
             args.extend(["-v", f"{kubeconfig_path.resolve()}:/root/.kube/config:ro"])
             args.extend(["-e", "KUBECONFIG=/root/.kube/config"])

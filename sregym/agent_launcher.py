@@ -87,6 +87,7 @@ class AgentLauncher:
             if reg is None or reg.container_isolation:
                 self.enable_container_isolation(force_build=force_build)
             if reg is not None and self._container_runner is not None:
+                self._apply_agent_capabilities(reg)
                 self._container_runner.prepare_agent_tools(reg.install_script, reg.agent_version)
                 self._run_preflight(reg)
         except BaseException:
@@ -94,6 +95,7 @@ class AgentLauncher:
             raise
 
     def _run_preflight(self, reg: AgentRegistration) -> None:
+        self._apply_agent_capabilities(reg)
         # Agents that need pre-flight check
         agent_driver_modules: dict[str, str] = {
             "stratus": "clients.stratus.stratus_agent.driver.driver",
@@ -112,8 +114,12 @@ class AgentLauncher:
         if not hasattr(driver_mod, "run_preflight"):
             return
 
+        runner = self._container_runner
+        if runner is None:
+            raise RuntimeError("container runner is required for agent preflight")
+
         check_cmd = f"python3 -c 'from {module_path} import run_preflight; run_preflight()'"
-        check_cmd = self._container_runner.build_composite_command(
+        check_cmd = runner.build_composite_command(
             install_script=reg.install_script,
             agent_version=reg.agent_version,
             driver_command=check_cmd,
@@ -121,7 +127,7 @@ class AgentLauncher:
         )
 
         logger.info(f"🔍 Running pre-flight check for '{reg.name}'...")
-        result = self._container_runner.run_sync(
+        result = runner.run_sync(
             ExecInput(command=check_cmd, env=dict(reg.kickoff_env or {}), label="preflight", timeout=180)
         )
         if result.returncode != 0:
@@ -137,6 +143,8 @@ class AgentLauncher:
     async def ensure_started(self, reg: AgentRegistration) -> AgentProcess | None:
         if not reg or not reg.kickoff_command:
             return None
+        if not reg.container_isolation and (not reg.kubernetes_access or not reg.sregym_mcp_access):
+            raise RuntimeError("capability restrictions require container isolation")
         existing = self._procs.get(reg.name)
 
         if existing:
@@ -205,8 +213,7 @@ class AgentLauncher:
             logger.warning("Container runner not initialized — skipping containerized start for '%s'", reg.name)
             return None
 
-        if self._agent_kubeconfig_path:
-            self._container_runner.config.kubeconfig_path = Path(self._agent_kubeconfig_path)
+        self._apply_agent_capabilities(reg)
 
         self._container_runner.config.env_vars.pop(HARNESS_PROBLEM_ID_ENV, None)
         self._container_runner.config.env_vars.pop(HARNESS_ARTIFACT_ID_ENV, None)
@@ -246,6 +253,16 @@ class AgentLauncher:
         t = threading.Thread(target=self._pipe_logs, args=(reg.name, proc), daemon=True)
         t.start()
         return ap
+
+    def _apply_agent_capabilities(self, reg: AgentRegistration) -> None:
+        if self._container_runner is None:
+            return
+        config = self._container_runner.config
+        config.kubernetes_access = reg.kubernetes_access
+        config.sregym_mcp_access = reg.sregym_mcp_access
+        config.kubeconfig_path = (
+            Path(self._agent_kubeconfig_path) if reg.kubernetes_access and self._agent_kubeconfig_path else None
+        )
 
     def cleanup_all(self, timeout: int = 10) -> None:
         """Terminate and cleanup all tracked agent processes/containers."""

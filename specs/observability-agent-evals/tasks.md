@@ -64,7 +64,9 @@ Traceability is a live checklist: each row names the focused test locations that
 
 ## [security] Agent Capability Isolation — Upstream Candidate
 
-- [ ] **C. Enforce per-agent Kubernetes and MCP capabilities** — First add failing registry/launcher/container tests showing an agent with both capability flags disabled receives no kubeconfig mount/environment, MCP URL, MCP filtered-egress rule, or benchmark tool endpoint in preflight and execution; also prove existing registrations default to both capabilities enabled. Implement the two backward-compatible registration fields and register Assistant with both disabled. Requirements: R1, R4, R9. Planned commit: `feat(agents): declare kubernetes and mcp capabilities`.
+- [x] **C. Enforce per-agent Kubernetes and MCP capabilities** — First add failing registry/launcher/container tests showing an agent with both capability flags disabled receives no kubeconfig mount/environment, MCP URL, MCP filtered-egress rule, or benchmark tool endpoint in preflight and execution; also prove existing registrations default to both capabilities enabled. Implement the two backward-compatible registration fields and register Assistant with both disabled. Requirements: R1, R4, R9. Planned commit: `feat(agents): declare kubernetes and mcp capabilities`.
+
+  Evidence: seven fail-first tests initially failed because the registration/config fields and Assistant registration did not exist. The completed focused suite has eight passing tests. A 201-test affected regression matrix passes across registry, launcher, egress, endpoint, credential, hardening, audit, and campaign behavior; all changed production lines have coverage. Ruff and Pyright pass on every touched Python file.
 
 ## [telemetry] Generic OTel Fan-Out — Upstream Candidate
 

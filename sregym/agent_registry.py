@@ -16,6 +16,8 @@ class AgentRegistration:
     install_script: str | None = None
     agent_version: str | None = None
     container_isolation: bool = True
+    kubernetes_access: bool = True
+    sregym_mcp_access: bool = True
 
 
 def _ensure_file(path: Path):
@@ -36,6 +38,8 @@ def list_agents(path: Path = DEFAULT_REG_PATH) -> dict[str, AgentRegistration]:
             install_script=a.get("install_script"),
             agent_version=a.get("agent_version"),
             container_isolation=a.get("container_isolation", True),
+            kubernetes_access=a.get("kubernetes_access", True),
+            sregym_mcp_access=a.get("sregym_mcp_access", True),
         )
     return out
 
