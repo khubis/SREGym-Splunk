@@ -247,6 +247,8 @@ packages = [
     "sregym.traces",
     "sregym.viewer",
     "clients",
+    "clients.assistant_v3",
+    "clients.assistant_v3.prompts",
     "scripts",
     "llm_backend",
     "logger",
@@ -256,3 +258,4 @@ packages = [
 atif_converter = ["README.md"]
 "atif_converter.atif" = ["UPSTREAM.md"]
 "sregym.viewer" = ["templates/*.html", "static/*.css"]
+"clients.assistant_v3.prompts" = ["*.yaml"]

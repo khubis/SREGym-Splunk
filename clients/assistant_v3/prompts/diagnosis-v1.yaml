@@ -1,0 +1,35 @@
+profile_id: sregym-stratus-diagnosis-v1
+reference_sha256: 6dac52b47f7b3da387f22aab311962f5106b9bb0537263e1daa185130a9a786c
+substitutions:
+  - id: remove_direct_kubernetes_enumeration
+    source_exact: "Get all the pods and deployments to figure out what kind of services are running in the cluster. "
+    replacement: ""
+    reason: Assistant v3 has no direct Kubernetes API or kubectl capability.
+  - id: remove_stratus_tool_instruction_protocol
+    source_exact: >-
+      Your instructions to the tools must be clear and concise. Your queries to tools need to be single turn.
+    replacement: ""
+    reason: Assistant v3 uses its existing Deep Agents tool protocol rather than Stratus single-turn tool instructions.
+  - id: diagnosis_only_evaluation
+    source_exact: "## Evaluation Pipeline You are being evaluated as part of a two-stage pipeline: **diagnosis → mitigation**. "
+    replacement: "## Evaluation You are being evaluated on diagnosis. "
+    reason: This evaluation runs only the benchmark diagnosis stage.
+  - id: remove_mitigation_stage
+    source_exact: >-
+      - **Mitigation (next stage)**: A separate mitigation agent will receive your diagnosis summary and attempt to fix the faults. After mitigation, the system is checked to verify that the application has sustainably recovered to a healthy state.
+    replacement: ""
+    reason: Assistant v3 is not asked to mitigate or hand off to a mitigation agent.
+  - id: remove_downstream_stage_dependency
+    source_exact: "Your diagnosis directly impacts the success of downstream stages. "
+    replacement: ""
+    reason: A diagnosis-only run has no downstream mitigation stage.
+  - id: replace_orchestrator_submission
+    source_exact: >-
+      After you finished, submit the detected faulty components to the orchestrator for evaluation. The submission should be a natural language description of the root cause of the failure.
+    replacement: >-
+      After you finish, provide a natural language description of the root cause of the failure.
+    reason: The driver submits a completed Assistant response; Assistant v3 has no benchmark submission tool.
+  - id: remove_stratus_round_control
+    source_exact: "In each round, there is a thinking stage. In the thinking stage, you are given a list of tools. Think about what you want to call. Return your tool choice and the reasoning behind When choosing the tool, refer to the tool by its name. Then, there is a tool-call stage, where you make a tool_call consistent with your explanation. You can run up to {max_step} rounds to finish the tasks. If you call submit_tool in tool-call stage, the process will end immediately. If you exceed this limitation, the system will force you to make a submission. "
+    replacement: ""
+    reason: Assistant v3 controls its own reasoning, tool calls, and completion without Stratus rounds or submit_tool.
