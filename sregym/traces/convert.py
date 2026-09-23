@@ -132,6 +132,9 @@ def _find_gemini_session_file(run_dir: Path) -> Path | None:
 
 def _find_session_file(run_dir: Path, tool: str) -> Path | None:
     """Resolve a canonical SREGym run directory to its native session file."""
+    if tool == "assistant_v3":
+        path = run_dir / "assistant_v3" / "events.jsonl"
+        return path if path.is_file() else None
     if tool == "codex":
         return _find_codex_session_file(run_dir)
     if tool == "cloudthinker":
@@ -339,6 +342,15 @@ def convert_run(run_dir: Path | str) -> Trajectory | None:
     trajectory = _convert_native_run(run_dir, info.tool)
     if trajectory is None:
         return None
+
+    if info.tool == "assistant_v3":
+        assistant_meta = (trajectory.extra or {}).get("assistant_v3")
+        if isinstance(assistant_meta, dict):
+            completion_step = assistant_meta.get("completion_step")
+            if isinstance(completion_step, int):
+                sregym_meta["diagnosis_submitted_step"] = completion_step
+            if "submitted" not in sregym_meta and isinstance(assistant_meta.get("submitted"), bool):
+                sregym_meta["submitted"] = assistant_meta["submitted"]
 
     # Boundary detection runs on the assembled trajectory; add it only when a
     # submission is found. Always (re)attach the assembled metadata so a run
