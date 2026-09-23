@@ -32,6 +32,15 @@ from sregym.conductor.utils import is_ordered_subset
 from sregym.generators.fault.inject_remote_os import RemoteOSFaultInjector
 from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.generators.noise.manager import get_noise_manager
+from sregym.observability.base import (
+    ApplicationScope,
+    AttemptContext,
+    DeliveryReport,
+    ExternalOtlpExport,
+    ObservabilityProvider,
+    ProviderError,
+    ReadinessReport,
+)
 from sregym.observer.jaeger import Jaeger
 from sregym.observer.otel_collector import OtelCollector
 from sregym.paths import CLUSTER_BASELINE_STATE_FILE
@@ -138,6 +147,11 @@ class Conductor:
         self.waiting_for_agent: bool = False
         self._evaluating: bool = False  # True while a submission is being evaluated
         self.fault_injected: bool = False
+        self._observability_provider: ObservabilityProvider | None = None
+        self._observability_context: AttemptContext | None = None
+        self.observability_export: ExternalOtlpExport | None = None
+        self.observability_readiness: ReadinessReport | None = None
+        self.observability_delivery: DeliveryReport | None = None
 
     @property
     def current_problem(self):
@@ -148,6 +162,66 @@ class Conductor:
 
     def register_agent(self, name="agent"):
         self.agent_name = name
+
+    def bind_observability_attempt(
+        self,
+        provider: ObservabilityProvider,
+        context: AttemptContext,
+    ) -> None:
+        """Bind one provider attempt before deployment begins."""
+        self._observability_provider = provider
+        self._observability_context = context
+        self.observability_export = None
+        self.observability_readiness = None
+        self.observability_delivery = None
+
+    def _observability_enabled(self) -> bool:
+        provider = getattr(self, "_observability_provider", None)
+        return provider is not None and provider.name != "none"
+
+    def _application_scope(self) -> ApplicationScope:
+        if self.app is None:
+            raise RuntimeError("Cannot resolve observability scope before application deployment")
+        namespaces = getattr(self.app, "namespaces", None) or (self.app.namespace,)
+        return ApplicationScope(
+            app_name=getattr(self.app, "app_name", getattr(self.app, "name", "")),
+            namespaces=tuple(namespaces),
+        )
+
+    def prepare_observability(self) -> ExternalOtlpExport | None:
+        """Prepare external export at the safe post-cleanup, pre-deploy seam."""
+        if not self._observability_enabled():
+            return None
+        assert self._observability_provider is not None
+        assert self._observability_context is not None
+        self.observability_export = self._observability_provider.prepare_attempt(self._observability_context)
+        return self.observability_export
+
+    def wait_for_observability(self) -> ReadinessReport | None:
+        """Require externally queryable signals before an agent is launched."""
+        if not self._observability_enabled():
+            return None
+        assert self._observability_provider is not None
+        assert self._observability_context is not None
+        self.observability_readiness = self._observability_provider.wait_until_queryable(
+            self._observability_context,
+            self._application_scope(),
+        )
+        return self.observability_readiness
+
+    def finish_observability(self) -> DeliveryReport | None:
+        """Audit final delivery exactly once, before destructive teardown."""
+        if not self._observability_enabled():
+            return None
+        if self.observability_delivery is not None:
+            return self.observability_delivery
+        assert self._observability_provider is not None
+        assert self._observability_context is not None
+        self.observability_delivery = self._observability_provider.finish_attempt(
+            self._observability_context,
+            self._application_scope(),
+        )
+        return self.observability_delivery
 
     def start_k8s_proxy(self):
         """
@@ -597,6 +671,23 @@ class Conductor:
             f"stage:{open_stage}"
         ):
             self._mark(f"stage:{open_stage}", "end", outcome="no_submission")
+        if self._observability_enabled():
+            try:
+                with self._phase("observability_delivery"):
+                    delivery = self.finish_observability()
+                if delivery is not None and not delivery.valid:
+                    self.results["infrastructure_invalid"] = True
+                    self.results["included_in_diagnosis_pass_rate"] = False
+            except ProviderError as exc:
+                self.logger.warning("Observability delivery audit failed: %s", exc)
+                self.results["infrastructure_invalid"] = True
+                self.results["included_in_diagnosis_pass_rate"] = False
+                self.results["observability_error"] = exc.kind
+            except Exception:
+                self.logger.exception("Observability delivery audit failed unexpectedly")
+                self.results["infrastructure_invalid"] = True
+                self.results["included_in_diagnosis_pass_rate"] = False
+                self.results["observability_error"] = "cleanup"
         with self._phase("cleanup"):
             self._cleanup_sync(cleanup_generation)
         self.logger.info("[STAGE] Teardown complete")
@@ -700,6 +791,9 @@ class Conductor:
         with self._phase("undeploy_leftovers"):
             self.undeploy_app()  # Cleanup any leftovers
         self.logger.info("App leftovers undeployed.")
+        if self._observability_enabled():
+            with self._phase("observability_prepare"):
+                self.prepare_observability()
         self.logger.info("Deploying app...")
         with self._phase("deploy"):
             self.deploy_app()
@@ -732,6 +826,10 @@ class Conductor:
 
         # After deployment, advance to the first stage
         await self._advance_to_next_stage(start_index=0)
+
+        if self._observability_enabled():
+            with self._phase("observability_readiness"):
+                self.wait_for_observability()
 
         self.execution_start_time = time.time()  # Reset: measure agent time only
 
@@ -1456,7 +1554,11 @@ class Conductor:
         self.jaeger.deploy()
 
         self.logger.info("[DEPLOY] Deploying OTel Collector…")
-        self.otel_collector.deploy()
+        external_export = getattr(self, "observability_export", None)
+        if external_export is None:
+            self.otel_collector.deploy()
+        else:
+            self.otel_collector.deploy(external_export)
 
         if self.config.deploy_loki:
             self.logger.info("[DEPLOY] Deploying Loki…")

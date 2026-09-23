@@ -324,17 +324,23 @@ class ContainerRunner:
                     "host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False
                 )
             )
-        rules.update(
-            provider_endpoint_rules(
-                self.config.internet_policy,
-                env_vars,
-                codex_subscription_auth=(
-                    self.config.internet_policy.is_filtered
-                    and (self.config.internet_policy.agent_name or "").casefold() == "codex"
-                    and _codex_subscription_auth_available(Path.home() / ".codex" / "auth.json")
-                ),
+        if (self.config.internet_policy.agent_name or "").casefold() == "assistant_v3":
+            assistant_url = env_vars.get("ASSISTANT_V3_URL", "").strip()
+            if not assistant_url:
+                raise ValueError("Filtered Assistant v3 access requires ASSISTANT_V3_URL")
+            rules.add(EndpointRule.host_from_url(assistant_url))
+        else:
+            rules.update(
+                provider_endpoint_rules(
+                    self.config.internet_policy,
+                    env_vars,
+                    codex_subscription_auth=(
+                        self.config.internet_policy.is_filtered
+                        and (self.config.internet_policy.agent_name or "").casefold() == "codex"
+                        and _codex_subscription_auth_available(Path.home() / ".codex" / "auth.json")
+                    ),
+                )
             )
-        )
         rules.update(
             EndpointRule.from_url(_replace_loopback_host(endpoint))
             for endpoint in self.config.internet_policy.additional_allowed_endpoints

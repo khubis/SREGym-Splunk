@@ -5,11 +5,15 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
+import httpx
 import pytest
 
-from clients.assistant_v3.client import AssistantEvent
+from clients.assistant_v3 import driver as driver_module
+from clients.assistant_v3.client import AssistantEvent, AssistantV3Client, AssistantV3Config, RetryPolicy
 from clients.assistant_v3.driver import (
     CAPABILITY_PROFILE,
     ArtifactError,
@@ -19,10 +23,21 @@ from clients.assistant_v3.driver import (
     AssistantRequest,
     AssistantRunMetadata,
     AssistantTerminal,
+    ConductorClient,
+    DriverRunConfig,
     derive_metrics,
+    execute_assistant_attempt,
+    finalize_attempt_artifacts,
+    write_pre_agent_failure,
 )
 from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt
-from sregym.observability.base import DeliveryReport, ReadinessReport, SignalName, SignalReadiness
+from sregym.observability.base import (
+    DeliveryReport,
+    ReadinessReport,
+    SignalName,
+    SignalReadiness,
+    serialize_provider_artifact,
+)
 
 RUN_ID = "anon_0123456789abcdef0123456789abcdef"
 OTHER_RUN_ID = "anon_ffffffffffffffffffffffffffffffff"
@@ -728,6 +743,556 @@ def test_non_serializable_metadata_is_rejected_before_writing(tmp_path: Path) ->
     with pytest.raises(ArtifactError, match="safe deterministic JSON"):
         AssistantArtifactStore(tmp_path).write(replace(base, metadata=unsafe_metadata))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_submission(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "conductor" and request.url.path == "/status":
+            return httpx.Response(200, json={"stage": "diagnosis"})
+        if request.url.host == "conductor" and request.url.path == "/get_app":
+            return httpx.Response(
+                200,
+                json={
+                    "app_name": "Astronomy Shop",
+                    "namespace": "otel-demo",
+                    "namespaces": ["otel-demo"],
+                    "descriptions": "A microservice application.",
+                    "oracle": "must never reach the prompt",
+                },
+            )
+        if request.url.host == "conductor" and request.url.path == "/submit":
+            return httpx.Response(200, json={"status": "200", "stage": "diagnosis", "message": "accepted"})
+        if request.url.host == "assistant" and request.url.path == "/v2/assistant/sessions":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'event: session.created\ndata: {"session_id":"fresh-session"}\n\n'
+                    b'event: message.complete\ndata: {"final_text":"The checkout dependency is saturated."}\n\n'
+                ),
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    assistant = AssistantV3Client(
+        AssistantV3Config(
+            base_url="https://assistant",
+            auth_token="assistant-secret",
+            sf_token="sf-secret",
+            model="gpt-5.6-luna",
+            reasoning="medium",
+        ),
+        http_client=httpx.Client(transport=transport),
+        retry_policy=RetryPolicy(max_attempts=1),
+        clock=iter((0.0, 0.01, 0.02)).__next__,
+    )
+    conductor = ConductorClient("http://conductor", http_client=httpx.Client(transport=transport))
+    result = execute_assistant_attempt(
+        DriverRunConfig(
+            run_id=RUN_ID,
+            attempt=1,
+            artifacts_root=tmp_path,
+            benchmark_profile="full",
+            comparable=True,
+            judge_model="fixed-judge",
+            judge_backend="api",
+            observability_provider="splunk",
+            readiness_report=readiness(),
+        ),
+        conductor=conductor,
+        assistant=assistant,
+        clock=iter((100.0, 100.2)).__next__,
+    )
+
+    assert result.classification == "completed"
+    assert [request.url.path for request in requests] == [
+        "/status",
+        "/get_app",
+        "/v2/assistant/sessions",
+        "/submit",
+    ]
+    session_request = json.loads(requests[2].content)
+    assert session_request["session_id"] is None
+    assert session_request["model"] == "gpt-5.6-luna"
+    assert session_request["reasoning"] == "medium"
+    assert "surface" not in session_request
+    assert "oracle" not in session_request["prompt"]
+    assert json.loads(requests[3].content) == {
+        "solution": "The checkout dependency is saturated.",
+        "stage": "diagnosis",
+    }
+    assert json.loads((tmp_path / "assistant_v3" / "terminal.json").read_text())["submission_count"] == 1
+
+
+def test_driver_preserves_invalid_stream_and_never_submits_it(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"stage": "diagnosis"})
+        if request.url.path == "/get_app":
+            return httpx.Response(
+                200,
+                json={
+                    "app_name": "Astronomy Shop",
+                    "namespace": "otel-demo",
+                    "namespaces": ["otel-demo"],
+                    "descriptions": "A microservice application.",
+                },
+            )
+        if request.url.path == "/v2/assistant/sessions":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b'event: message.delta\ndata: {"text":"partial"}\n\n',
+            )
+        if request.url.path == "/submit":
+            raise AssertionError("partial output must never be submitted")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    assistant = AssistantV3Client(
+        AssistantV3Config("https://assistant", "assistant-secret", "sf-secret", "gpt-5.6-luna", "medium"),
+        http_client=httpx.Client(transport=transport),
+        retry_policy=RetryPolicy(max_attempts=1),
+        clock=iter((0.0, 0.01)).__next__,
+    )
+    conductor = ConductorClient("http://conductor", http_client=httpx.Client(transport=transport))
+
+    result = execute_assistant_attempt(
+        DriverRunConfig(
+            run_id=RUN_ID,
+            attempt=1,
+            artifacts_root=tmp_path,
+            benchmark_profile="full",
+            comparable=True,
+            judge_model="fixed-judge",
+            judge_backend="api",
+            observability_provider="splunk",
+            readiness_report=readiness(),
+        ),
+        conductor=conductor,
+        assistant=assistant,
+        clock=iter((100.0, 100.2)).__next__,
+    )
+
+    assert result.classification == "incomplete_stream"
+    assert "/submit" not in [request.url.path for request in requests]
+    terminal = json.loads((tmp_path / "assistant_v3" / "terminal.json").read_text())
+    assert terminal["submitted"] is False
+    assert terminal["final_text"] is None
+    assert (tmp_path / "failure.json").exists()
+
+
+def test_pre_agent_provider_failure_still_writes_complete_inspectable_artifacts(tmp_path: Path) -> None:
+    config = DriverRunConfig(
+        run_id=RUN_ID,
+        attempt=1,
+        artifacts_root=tmp_path,
+        benchmark_profile="svelte",
+        comparable=False,
+        judge_model="fixed-judge",
+        judge_backend="api",
+        observability_provider="splunk",
+        readiness_report=readiness(ready=False),
+    )
+    assistant_config = AssistantV3Config(
+        "https://assistant.example.test",
+        "assistant-secret",
+        "sf-secret",
+        "gpt-5.6-luna",
+        "medium",
+    )
+
+    result = write_pre_agent_failure(
+        config,
+        assistant_configuration=assistant_config,
+        safe_message="required telemetry was not queryable",
+        prompt_context={
+            "app_name": "Astronomy Shop",
+            "app_description": "A microservice application.",
+            "app_namespace": "otel-demo",
+        },
+    )
+
+    assert result.classification == "infrastructure_invalid"
+    metadata_value = json.loads((tmp_path / "run_metadata.json").read_text())
+    assert metadata_value["included_in_diagnosis_pass_rate"] is False
+    assert metadata_value["comparable"] is False
+    assert (tmp_path / "assistant_v3" / "events.jsonl").exists()
+
+
+def test_closing_delivery_audit_updates_artifacts_without_erasing_agent_evidence(tmp_path: Path) -> None:
+    AssistantArtifactStore(tmp_path).write(completed_bundle(delivery=None, cleanup_status="pending"))
+    before_events = (tmp_path / "assistant_v3" / "events.jsonl").read_bytes()
+
+    finalize_attempt_artifacts(
+        tmp_path,
+        delivery=invalid_delivery(),
+        cleanup_status="completed",
+    )
+
+    assert (tmp_path / "assistant_v3" / "events.jsonl").read_bytes() == before_events
+    metadata_value = json.loads((tmp_path / "run_metadata.json").read_text())
+    failure_value = json.loads((tmp_path / "failure.json").read_text())
+    assert metadata_value["classification"] == "infrastructure_invalid"
+    assert metadata_value["included_in_diagnosis_pass_rate"] is False
+    assert failure_value["phase"] == "delivery"
+    assert failure_value["cleanup_status"] == "completed"
+    assert json.loads((tmp_path / "observability" / "delivery.json").read_text())["valid"] is False
+
+
+def test_driver_config_file_round_trip_preserves_readiness_and_attempt_start(tmp_path: Path) -> None:
+    payload = {
+        "run_id": RUN_ID,
+        "attempt": 2,
+        "benchmark_profile": "full",
+        "comparable": True,
+        "judge_model": "fixed-judge",
+        "judge_backend": "api",
+        "observability_provider": "splunk",
+        "readiness_report": serialize_provider_artifact(readiness()),
+        "attempt_started_at": "2026-09-23T12:00:00Z",
+    }
+    path = tmp_path / "assistant_v3_driver_config.json"
+    path.write_text(json.dumps(payload))
+
+    config = DriverRunConfig.from_file(path)
+
+    assert config.artifacts_root == tmp_path
+    assert config.readiness_report == readiness()
+    assert config.attempt_started_at == STARTED_AT
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        ("not json", "unavailable or invalid"),
+        ("[]", "must be an object"),
+        ("{}", "incomplete"),
+        (json.dumps({"readiness_report": {}}), "readiness"),
+        (
+            json.dumps(
+                {
+                    "run_id": RUN_ID,
+                    "attempt": 1,
+                    "benchmark_profile": "full",
+                    "comparable": True,
+                    "judge_model": "judge",
+                    "judge_backend": "api",
+                    "observability_provider": "splunk",
+                    "readiness_report": {"signals": [{}]},
+                }
+            ),
+            "readiness",
+        ),
+        (
+            json.dumps(
+                {
+                    "run_id": RUN_ID,
+                    "attempt": 1,
+                    "benchmark_profile": "full",
+                    "comparable": True,
+                    "judge_model": "judge",
+                    "judge_backend": "api",
+                    "observability_provider": "splunk",
+                    "attempt_started_at": "bad-date",
+                }
+            ),
+            "incomplete",
+        ),
+    ],
+)
+def test_driver_config_file_rejects_invalid_inputs(tmp_path: Path, payload: str, message: str) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(payload)
+    with pytest.raises(ArtifactError, match=message):
+        DriverRunConfig.from_file(path)
+
+
+def test_driver_config_file_rejects_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(ArtifactError, match="unavailable"):
+        DriverRunConfig.from_file(tmp_path / "missing.json")
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"attempt": 0}, "attempt"),
+        ({"benchmark_profile": "tiny"}, "profile"),
+        ({"benchmark_profile": "svelte", "comparable": True}, "comparable"),
+        ({"judge_model": ""}, "judge"),
+        ({"readiness_report": readiness(run_id=OTHER_RUN_ID)}, "identities"),
+        ({"attempt_started_at": datetime(2026, 9, 23, 12, 0)}, "UTC"),
+    ],
+)
+def test_driver_config_validation_rejects_inaccurate_labels(changes: dict[str, Any], message: str) -> None:
+    values: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "attempt": 1,
+        "artifacts_root": Path("/tmp/artifacts"),
+        "benchmark_profile": "full",
+        "comparable": True,
+        "judge_model": "judge",
+        "judge_backend": "api",
+        "observability_provider": "splunk",
+        "readiness_report": readiness(),
+    }
+    values.update(changes)
+    with pytest.raises(ArtifactError, match=message):
+        DriverRunConfig(**values).validate()
+
+
+@pytest.mark.parametrize(
+    "path, response, method, message",
+    [
+        ("/status", httpx.Response(200, text="not-json"), "require_diagnosis", "status response"),
+        ("/status", httpx.Response(200, json={"stage": "mitigation"}), "require_diagnosis", "not ready"),
+        ("/get_app", httpx.Response(503), "get_prompt_context", "unavailable"),
+        ("/get_app", httpx.Response(200, text="not-json"), "get_prompt_context", "metadata is invalid"),
+        ("/get_app", httpx.Response(200, json=[]), "get_prompt_context", "metadata is invalid"),
+        ("/get_app", httpx.Response(200, json={"app_name": 1}), "get_prompt_context", "metadata is invalid"),
+        (
+            "/get_app",
+            httpx.Response(200, json={"app_name": "app", "descriptions": "description"}),
+            "get_prompt_context",
+            "metadata is invalid",
+        ),
+    ],
+)
+def test_conductor_client_rejects_invalid_public_contract(path, response, method, message) -> None:
+    client = ConductorClient(
+        "http://conductor/",
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: response)),
+    )
+    with pytest.raises(driver_module.ConductorError, match=message):
+        getattr(client, method)()
+
+
+def test_conductor_client_uses_single_namespace_fallback_and_rejects_second_submit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/get_app":
+            return httpx.Response(
+                200,
+                json={"app_name": "app", "descriptions": "description", "namespace": "only-one"},
+            )
+        return httpx.Response(200)
+
+    client = ConductorClient("http://conductor", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert client.get_prompt_context()["app_namespace"] == "only-one"
+    client.submit_diagnosis("answer")
+    with pytest.raises(driver_module.ConductorError, match="already attempted"):
+        client.submit_diagnosis("answer again")
+
+
+def test_conductor_client_rejects_unaccepted_submission_and_closes_owned_client() -> None:
+    client = ConductorClient(
+        "http://conductor",
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500))),
+    )
+    with pytest.raises(driver_module.ConductorError, match="not accepted"):
+        client.submit_diagnosis("answer")
+
+    owned = ConductorClient("http://conductor")
+    close = Mock()
+    owned._client = SimpleNamespace(close=close)  # type: ignore[assignment]
+    owned.close()
+    close.assert_called_once()
+
+    external = ConductorClient("http://conductor", http_client=httpx.Client())
+    external.close()
+
+
+@pytest.mark.parametrize("submission_status", [500, 503])
+def test_driver_preserves_ambiguous_submission_without_retry(tmp_path: Path, submission_status: int) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"stage": "diagnosis"})
+        if request.url.path == "/get_app":
+            return httpx.Response(
+                200,
+                json={"app_name": "app", "descriptions": "description", "namespace": "namespace"},
+            )
+        if request.url.path == "/v2/assistant/sessions":
+            return httpx.Response(
+                200,
+                content=b'event: message.complete\ndata: {"final_text":"answer"}\n\n',
+            )
+        return httpx.Response(submission_status)
+
+    transport = httpx.MockTransport(handler)
+    assistant = AssistantV3Client(
+        AssistantV3Config("https://assistant", "assistant-secret", "sf-secret", "model", "medium"),
+        http_client=httpx.Client(transport=transport),
+        retry_policy=RetryPolicy(max_attempts=1),
+        clock=iter((0.0, 0.01)).__next__,
+    )
+    config = DriverRunConfig(
+        RUN_ID,
+        1,
+        tmp_path,
+        "full",
+        True,
+        "judge",
+        "api",
+        "splunk",
+        readiness(),
+    )
+
+    result = execute_assistant_attempt(
+        config,
+        conductor=ConductorClient("http://conductor", http_client=httpx.Client(transport=transport)),
+        assistant=assistant,
+        clock=iter((1.0, 1.1)).__next__,
+    )
+
+    assert result.classification == "ambiguous_completion"
+    assert paths.count("/submit") == 1
+
+
+def test_driver_persists_conductor_failure_before_session_start(tmp_path: Path) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"stage": "mitigation"}))
+    assistant = AssistantV3Client(
+        AssistantV3Config("https://assistant", "assistant-secret", "sf-secret", "model", "medium"),
+        http_client=httpx.Client(transport=transport),
+    )
+    config = DriverRunConfig(RUN_ID, 1, tmp_path, "full", True, "judge", "api", "splunk", readiness())
+
+    result = execute_assistant_attempt(
+        config,
+        conductor=ConductorClient("http://conductor", http_client=httpx.Client(transport=transport)),
+        assistant=assistant,
+        clock=iter((1.0, 1.1)).__next__,
+    )
+
+    assert result.classification == "configuration_error"
+    request_value = json.loads((tmp_path / "assistant_v3" / "request.json").read_text())
+    assert "unavailable" in request_value["prompt"]
+
+
+def test_event_spool_reports_disk_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Path, "open", Mock(side_effect=OSError("disk full")))
+    with pytest.raises(ArtifactError, match="spool"):
+        driver_module._append_event_spool(tmp_path / "events.jsonl", event(1, 1.0, "message.delta", {}))
+
+
+def test_finalizer_updates_existing_agent_failure_cleanup_status(tmp_path: Path) -> None:
+    failure = AssistantFailure("incomplete_stream", "ended", 5, 0, "assistant_execution", "pending")
+    partial_events = events()[:5]
+    AssistantArtifactStore(tmp_path).write(
+        completed_bundle(
+            events=partial_events,
+            terminal=AssistantTerminal("incomplete_stream", None, None, False, 0, None, None),
+            metadata=metadata(classification="incomplete_stream"),
+            agent_duration_ms=50,
+            delivery=None,
+            failure=failure,
+        )
+    )
+
+    finalize_attempt_artifacts(tmp_path, delivery=valid_delivery(), cleanup_status="failed")
+
+    assert json.loads((tmp_path / "failure.json").read_text())["cleanup_status"] == "failed"
+    assert (tmp_path / "observability" / "delivery.json").exists()
+
+
+@pytest.mark.parametrize(
+    "setup, message",
+    [
+        (lambda root: None, "unavailable"),
+        (
+            lambda root: (
+                (root / "assistant_v3").mkdir(),
+                (root / "run_metadata.json").write_text("[]"),
+                (root / "assistant_v3" / "terminal.json").write_text("{}"),
+                (root / "assistant_v3" / "events.jsonl").write_text("header\n"),
+            ),
+            "invalid",
+        ),
+    ],
+)
+def test_finalizer_rejects_missing_or_invalid_core_artifacts(tmp_path: Path, setup, message: str) -> None:
+    setup(tmp_path)
+    with pytest.raises(ArtifactError, match=message):
+        finalize_attempt_artifacts(tmp_path, delivery=None, cleanup_status="completed")
+
+
+@pytest.mark.parametrize("failure_content", ["not-json", "[]"])
+def test_finalizer_rejects_invalid_existing_failure(tmp_path: Path, failure_content: str) -> None:
+    AssistantArtifactStore(tmp_path).write(completed_bundle(delivery=valid_delivery()))
+    (tmp_path / "failure.json").write_text(failure_content)
+    with pytest.raises(ArtifactError, match="failure artifact"):
+        finalize_attempt_artifacts(tmp_path, delivery=None, cleanup_status="completed")
+
+
+def test_finalizer_rejects_invalid_cleanup_status(tmp_path: Path) -> None:
+    with pytest.raises(ArtifactError, match="cleanup"):
+        finalize_attempt_artifacts(
+            tmp_path,
+            delivery=None,
+            cleanup_status="unknown",  # type: ignore[arg-type]
+        )
+
+
+def test_finalizer_accepts_success_without_optional_delivery_or_failure(tmp_path: Path) -> None:
+    AssistantArtifactStore(tmp_path).write(completed_bundle(delivery=valid_delivery()))
+    (tmp_path / "observability" / "delivery.json").unlink()
+
+    finalize_attempt_artifacts(tmp_path, delivery=None, cleanup_status="completed")
+
+    assert not (tmp_path / "failure.json").exists()
+    assert not (tmp_path / "observability" / "delivery.json").exists()
+
+
+def test_preflight_closes_client_on_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    configuration = AssistantV3Config("https://assistant", "auth", "sf", "model", "medium")
+    monkeypatch.setattr(driver_module.AssistantV3Config, "from_env", Mock(return_value=configuration))
+    client = Mock()
+    monkeypatch.setattr(driver_module, "AssistantV3Client", Mock(return_value=client))
+
+    driver_module.run_preflight()
+    client.preflight.assert_called_once_with(request_id="anon_00000000000000000000000000000000")
+    client.close.assert_called_once()
+
+    client.reset_mock()
+    client.preflight.side_effect = RuntimeError("offline")
+    with pytest.raises(RuntimeError, match="offline"):
+        driver_module.run_preflight()
+    client.close.assert_called_once()
+
+
+@pytest.mark.parametrize("classification, expected", [("completed", 0), ("assistant_error", 1)])
+def test_driver_main_closes_clients_and_maps_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    classification: str,
+    expected: int,
+) -> None:
+    config = DriverRunConfig(RUN_ID, 1, tmp_path, "full", True, "judge", "api", "splunk", readiness())
+    configuration = AssistantV3Config("https://assistant", "auth", "sf", "model", "medium")
+    conductor = Mock()
+    assistant = Mock()
+    monkeypatch.setenv("SREGYM_ASSISTANT_DRIVER_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setattr(driver_module.DriverRunConfig, "from_file", Mock(return_value=config))
+    monkeypatch.setattr(driver_module.AssistantV3Config, "from_env", Mock(return_value=configuration))
+    monkeypatch.setattr(driver_module, "ConductorClient", Mock(return_value=conductor))
+    monkeypatch.setattr(driver_module, "AssistantV3Client", Mock(return_value=assistant))
+    monkeypatch.setattr(
+        driver_module,
+        "execute_assistant_attempt",
+        Mock(return_value=SimpleNamespace(classification=classification)),
+    )
+
+    assert driver_module.main() == expected
+    assistant.close.assert_called_once()
+    conductor.close.assert_called_once()
 
 
 def test_failure_classification_and_last_sequence_must_match_attempt(tmp_path: Path) -> None:

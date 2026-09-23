@@ -189,6 +189,9 @@ def test_driver_records_profile_in_result_rows(tmp_path, monkeypatch, selected_p
     row = results[0]["demo"][0]
     assert row["deployment_profile"] == selected_profile
     assert bool(row.get("deploy_failed")) == deploy_failed
+    assert "observability_provider" not in row
+    assert "comparable" not in row
+    conductor.bind_observability_attempt.assert_not_called()
     csv_files = list(tmp_path.rglob("*.csv"))
     assert csv_files
     for path in csv_files:

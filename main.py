@@ -3,13 +3,14 @@ import asyncio
 import contextlib
 import csv
 import importlib
+import json
 import logging
 import os
 import sys
 import threading
 import time
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rich.progress import (
@@ -22,6 +23,12 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from clients.assistant_v3.client import AssistantV3Config
+from clients.assistant_v3.driver import (
+    DriverRunConfig,
+    finalize_attempt_artifacts,
+    write_pre_agent_failure,
+)
 from clients.harness.problem_id import HARNESS_ARTIFACT_ID_ENV, HARNESS_PROBLEM_ID_ENV
 from clients.jev.config import configure as configure_jev
 from logger import console, init_logger
@@ -30,6 +37,8 @@ from sregym.agent_registry import get_agent, list_agents
 from sregym.conductor.conductor import ALL_STAGES, Conductor, ConductorConfig
 from sregym.conductor.conductor_api import request_shutdown, run_api
 from sregym.conductor.problem_sets import PROBLEM_SETS
+from sregym.observability import create_provider
+from sregym.observability.base import AttemptContext, ObservabilityProvider, ProviderError, serialize_provider_artifact
 from sregym.phases import read_ledger as read_phase_ledger
 from sregym.phases import results_columns as phase_results_columns
 from sregym.profile import PROFILES, get_profile, set_profile
@@ -74,6 +83,29 @@ class BenchmarkCampaignAborted(RuntimeError):
         self.partial_results = partial_results
 
 
+def validate_assistant_campaign(args) -> None:
+    """Reject Assistant campaigns whose labels or lifecycle would be incomparable."""
+    if args.agent != "assistant_v3":
+        return
+    if args.use_external_harness:
+        raise ValueError("Assistant v3 cannot run through the external harness")
+    if args.stages != ["diagnosis"]:
+        raise ValueError("Assistant v3 comparison runs must be diagnosis-only")
+    lite_cases = frozenset(PROBLEM_SETS["sregym-lite"])
+    if args.suite != "sregym-lite" and args.problem not in lite_cases:
+        raise ValueError("Assistant v3 v1 supports only registered SREGym-Lite cases")
+    if not isinstance(args.model, str) or not args.model.strip():
+        raise ValueError("Assistant v3 requires an explicit model")
+    if args.reasoning_effort not in {"low", "medium", "high"}:
+        raise ValueError("Assistant v3 requires explicit low, medium, or high reasoning")
+    if not isinstance(args.judge_model, str) or not args.judge_model.strip():
+        raise ValueError("Assistant v3 requires an explicit judge model")
+    if not isinstance(args.judge_backend, str) or not args.judge_backend.strip():
+        raise ValueError("Assistant v3 requires an explicit judge backend")
+    if args.observability_provider != "splunk":
+        raise ValueError("Assistant v3 benchmark runs require the Splunk observability provider")
+
+
 def run_preflight_check(
     agent_name: str,
     container_runner: ContainerRunner | None = None,
@@ -89,6 +121,7 @@ def run_preflight_check(
         "gemini": "clients.geminicli.driver",
         "cursor": "clients.cursor.driver",
         "mini-sre": "clients.mini_sre.driver",
+        "assistant_v3": "clients.assistant_v3.driver",
     }
     module_path = agent_driver_modules.get(agent_name)
     if not module_path:
@@ -102,8 +135,17 @@ def run_preflight_check(
     check_cmd = f"python3 -c 'from {module_path} import run_preflight; run_preflight()'"
     if install_script and not container_runner.has_prepared_agent_tools:
         check_cmd = f"/opt/sregym/install-scripts/{install_script} > /dev/null 2>&1 && {check_cmd}"
+    preflight_env = {}
+    if agent_name == "assistant_v3":
+        preflight_env = {
+            name: os.environ[name]
+            for name in ("ASSISTANT_V3_URL", "ASSISTANT_V3_AUTH_TOKEN", "SF_TOKEN")
+            if os.environ.get(name)
+        }
     try:
-        result = container_runner.run_sync(ExecInput(command=check_cmd, label="preflight", timeout=180))
+        result = container_runner.run_sync(
+            ExecInput(command=check_cmd, env=preflight_env, label="preflight", timeout=180)
+        )
     except BaseException:
         container_runner.close()
         raise
@@ -215,6 +257,92 @@ def _artifact_environment(run: RunArtifacts):
             _restore_env_var(name, value)
 
 
+def _assistant_runtime_environment() -> dict[str, str]:
+    """Return only the Assistant credentials/config needed by its isolated driver."""
+    names = (
+        "ASSISTANT_V3_URL",
+        "ASSISTANT_V3_AUTH_TOKEN",
+        "SF_TOKEN",
+        "AGENT_MODEL_ID",
+        "AGENT_REASONING_EFFORT",
+        "API_PORT",
+    )
+    environment = {name: os.environ[name] for name in names if os.environ.get(name)}
+    environment["SREGYM_ASSISTANT_DRIVER_CONFIG"] = "/logs/assistant_v3_driver_config.json"
+    return environment
+
+
+def _write_assistant_driver_config(
+    run: RunArtifacts,
+    conductor: Conductor,
+    agent_version: str | None,
+    provider: ObservabilityProvider,
+    judge_backend: str,
+) -> None:
+    driver_config = _assistant_driver_config(run, conductor, agent_version, provider, judge_backend)
+    readiness = conductor.observability_readiness
+    payload = {
+        "run_id": driver_config.run_id,
+        "attempt": driver_config.attempt,
+        "benchmark_profile": driver_config.benchmark_profile,
+        "comparable": driver_config.comparable,
+        "judge_model": driver_config.judge_model,
+        "judge_backend": driver_config.judge_backend,
+        "observability_provider": driver_config.observability_provider,
+        "readiness_report": serialize_provider_artifact(readiness) if readiness is not None else None,
+        "agent_version": driver_config.agent_version,
+        "observability_chart_version": driver_config.observability_chart_version,
+        "hec_index": driver_config.hec_index,
+        "logs_connection_id": driver_config.logs_connection_id,
+        "attempt_started_at": (
+            driver_config.attempt_started_at.isoformat().replace("+00:00", "Z")
+            if driver_config.attempt_started_at is not None
+            else None
+        ),
+    }
+    path = run.active_dir / "assistant_v3_driver_config.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+
+def _assistant_driver_config(
+    run: RunArtifacts,
+    conductor: Conductor,
+    agent_version: str | None,
+    provider: ObservabilityProvider,
+    judge_backend: str,
+) -> DriverRunConfig:
+    configuration = getattr(provider, "configuration", None)
+    attempt_context = getattr(conductor, "_observability_context", None)
+    return DriverRunConfig(
+        run_id=run.artifact_id,
+        attempt=run.attempt,
+        artifacts_root=run.active_dir,
+        benchmark_profile=get_profile(),
+        comparable=get_profile() == "full",
+        judge_model=os.environ["JUDGE_MODEL_ID"],
+        judge_backend=judge_backend,
+        observability_provider=provider.name,
+        readiness_report=conductor.observability_readiness,
+        agent_version=agent_version,
+        observability_chart_version="0.160.0" if provider.name == "splunk" else None,
+        hec_index=getattr(configuration, "hec_index", None),
+        logs_connection_id=getattr(provider, "_connection_id", None),
+        attempt_started_at=getattr(attempt_context, "attempt_started_at", None),
+    )
+
+
+def _assistant_prompt_context(conductor: Conductor) -> dict[str, str]:
+    app = conductor.app
+    if app is None:
+        raise RuntimeError("Assistant prompt metadata is unavailable before application setup")
+    namespaces = getattr(app, "namespaces", None) or [app.namespace]
+    return {
+        "app_name": app.app_name,
+        "app_description": str(app.description),
+        "app_namespace": ", ".join(namespaces),
+    }
+
+
 def driver_loop(
     conductor: Conductor,
     problem_selection: Sequence[str] | None = None,
@@ -224,6 +352,7 @@ def driver_loop(
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
     judge_backend: str = "api",
+    observability_provider: ObservabilityProvider | None = None,
 ):
     """
     Deploy each problem and wait for HTTP grading via POST /submit.
@@ -239,6 +368,7 @@ def driver_loop(
     """
 
     async def driver():
+        provider = observability_provider or create_provider("none")
         base_dir = Path("results") / get_current_datetime_formatted()
         base_dir.mkdir(parents=True, exist_ok=True)
         global _driver_base_dir
@@ -253,6 +383,8 @@ def driver_loop(
             # so do not let stale local-run state affect them.
             conductor.clear_cluster_egress_boundary()
         else:
+            if agent_to_run is None:
+                raise ValueError("agent_to_run is required unless using an external harness")
             available_agents = list_agents(path=Path(os.path.dirname(os.path.abspath(__file__))) / "agents.yaml").keys()
             if agent_to_run not in available_agents:
                 console.log(f"⚠️ Agent '{agent_to_run}' not found in registry. Available agents: {available_agents}")
@@ -384,6 +516,25 @@ def driver_loop(
                 )
                 console.log(f"\n🔍 Starting problem: {pid} (Attempt {attempt} of {n_attempts})")
 
+                run = None
+                if provider.name != "none" or agent_to_run == "assistant_v3":
+                    run = RunArtifacts.create(
+                        staging_root=Path(".runtime"),
+                        results_root=base_dir,
+                        problem_id=pid,
+                        agent=agent_to_run or "agent",
+                        attempt=attempt,
+                    )
+                    conductor.bind_observability_attempt(
+                        provider,
+                        AttemptContext(
+                            run_id=run.artifact_id,
+                            profile=get_profile(),
+                            comparable=get_profile() == "full",
+                            attempt_started_at=datetime.now(UTC),
+                        ),
+                    )
+
                 # Bind the phase ledger before the first phase runs. It cannot
                 # live inside the run directory: RunArtifacts.create() happens
                 # after deploy, and deploy is a phase we want recorded. Sitting
@@ -407,12 +558,14 @@ def driver_loop(
                 # Retry start_problem up to 3 times to handle transient deploy failures
                 max_deploy_retries = 3
                 result = None
+                start_error: Exception | None = None
                 deploy_cleanup_failed = False
                 for deploy_attempt in range(1, max_deploy_retries + 1):
                     try:
                         result = await conductor.start_problem()
                         break  # Success — exit retry loop
                     except Exception as e:
+                        start_error = e
                         console.log(
                             f"❌ start_problem failed for '{pid}' "
                             f"(deploy attempt {deploy_attempt}/{max_deploy_retries}): {e}"
@@ -421,6 +574,13 @@ def driver_loop(
                             console.log(
                                 "⛔ Image platform failures require a compatible image; skipping deploy retries"
                             )
+                            break
+                        if isinstance(e, ProviderError):
+                            console.log("⛔ Observability readiness failed; skipping deploy retries")
+                            conductor.results["infrastructure_invalid"] = True
+                            conductor.results["included_in_diagnosis_pass_rate"] = False
+                            conductor.results["observability_error"] = e.kind
+                            conductor.observability_readiness = e.readiness_report
                             break
                         if deploy_attempt < max_deploy_retries:
                             console.log("🧹 Cleaning up before retry...")
@@ -460,6 +620,24 @@ def driver_loop(
                                 snapshot[f"{stage}.{key}"] = value
                         else:
                             snapshot[stage] = outcome
+                    if run is not None and agent_to_run == "assistant_v3":
+                        driver_config = _assistant_driver_config(run, conductor, None, provider, judge_backend)
+                        write_pre_agent_failure(
+                            driver_config,
+                            assistant_configuration=AssistantV3Config.from_env(),
+                            safe_message=(
+                                str(start_error)
+                                if isinstance(start_error, ProviderError)
+                                else "Benchmark infrastructure failed before Assistant launch"
+                            ),
+                            prompt_context=_assistant_prompt_context(conductor),
+                        )
+                        failure_fields = sorted({key for row in [*all_results_for_agent, snapshot] for key in row})
+                        run.finalize_and_publish(
+                            snapshot=snapshot,
+                            fieldnames=failure_fields,
+                            ownership_image=LAUNCHER.container_image,
+                        )
                     all_results_for_agent.append(snapshot)
                     fieldnames = sorted({key for row in all_results_for_agent for key in row})
                     with open(tmp_path, "w", newline="") as csvfile:
@@ -499,15 +677,14 @@ def driver_loop(
 
                 assert agent_to_run is not None
 
-                run = RunArtifacts.create(
-                    # Opaque artifacts must share the final output filesystem
-                    # too: finalization publishes them with an atomic rename.
-                    staging_root=base_dir / ".runtime",
-                    results_root=base_dir,
-                    problem_id=pid,
-                    agent=agent_to_run,
-                    attempt=attempt,
-                )
+                if run is None:
+                    run = RunArtifacts.create(
+                        staging_root=base_dir / ".runtime",
+                        results_root=base_dir,
+                        problem_id=pid,
+                        agent=agent_to_run,
+                        attempt=attempt,
+                    )
                 agent_proc = None
                 conductor.agent_timeout_seconds = agent_timeout
 
@@ -518,6 +695,18 @@ def driver_loop(
                             path=Path(os.path.dirname(os.path.abspath(__file__))) / "agents.yaml",
                         )
                         if reg:
+                            if agent_to_run == "assistant_v3":
+                                _write_assistant_driver_config(
+                                    run,
+                                    conductor,
+                                    reg.agent_version,
+                                    provider,
+                                    judge_backend,
+                                )
+                                reg.kickoff_env = {
+                                    **(reg.kickoff_env or {}),
+                                    **_assistant_runtime_environment(),
+                                }
                             agent_proc = await LAUNCHER.ensure_started(reg)
                 else:
                     console.log("⏩ No agent stages are configured; waiting only for bounded cleanup")
@@ -680,12 +869,36 @@ def driver_loop(
                     LAUNCHER.cleanup_agent(agent_to_run)
                     console.log(f"🧹 Cleaned up agent process for {agent_to_run}")
 
+                (run.active_dir / "assistant_v3_driver_config.json").unlink(missing_ok=True)
+                if agent_to_run == "assistant_v3":
+                    if not (run.active_dir / "run_metadata.json").exists():
+                        write_pre_agent_failure(
+                            _assistant_driver_config(run, conductor, None, provider, judge_backend),
+                            assistant_configuration=AssistantV3Config.from_env(),
+                            safe_message="Assistant driver exited without a complete artifact set",
+                            prompt_context=_assistant_prompt_context(conductor),
+                        )
+                    finalize_attempt_artifacts(
+                        run.active_dir,
+                        delivery=conductor.observability_delivery,
+                        cleanup_status="failed" if conductor.results.get("cleanup_failed") else "completed",
+                        infrastructure_error=(
+                            "Observability delivery audit failed"
+                            if conductor.results.get("observability_error")
+                            and conductor.observability_delivery is None
+                            else None
+                        ),
+                    )
+
                 snapshot = {
                     "problem_id": pid,
                     "attempt": attempt,
                     "deployment_profile": get_profile(),
                     "judge_backend": judge_backend,
                 }
+                if provider.name != "none" or agent_to_run == "assistant_v3":
+                    snapshot["observability_provider"] = provider.name
+                    snapshot["comparable"] = get_profile() == "full"
                 if os.environ.get("AGENT_JEV_MODEL"):
                     snapshot["jev_model"] = os.environ["AGENT_JEV_MODEL"]
                 internet_audit = LAUNCHER.internet_policy_result(agent_proc)
@@ -809,6 +1022,7 @@ def _run_driver_and_shutdown(
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
     judge_backend: str = "api",
+    observability_provider: ObservabilityProvider | None = None,
 ):
     """Run the benchmark driver, stash results, then tell the API to exit."""
     global _driver_error, _driver_results
@@ -822,6 +1036,7 @@ def _run_driver_and_shutdown(
             agent_timeout=agent_timeout,
             resume_csv=resume_csv,
             judge_backend=judge_backend,
+            observability_provider=observability_provider,
         )
         _driver_results = results
     except BenchmarkCampaignAborted as exc:
@@ -849,7 +1064,10 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
     _driver_error = None
     _driver_results = []
 
+    validate_assistant_campaign(args)
     agent_model, judge_model = _configure_model_environment(args)
+    observability_provider = create_provider(getattr(args, "observability_provider", "none"))
+    observability_provider.preflight()
     internet_policy = InternetPolicy.from_mode(
         args.internet_access,
         agent_name=args.agent,
@@ -947,8 +1165,9 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
     conductor = Conductor(config=conductor_config)
 
     suite = getattr(args, "suite", None)
-    problem_selection = (args.problem,) if args.problem else PROBLEM_SETS.get(suite)
+    problem_selection = (args.problem,) if args.problem else PROBLEM_SETS.get(suite) if isinstance(suite, str) else None
     if suite:
+        assert problem_selection is not None
         logger.info(f"Running {suite}: {len(problem_selection)} problems")
 
     # Start the driver in the background; it will call request_shutdown() when finished
@@ -964,7 +1183,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
             args.resume,
         ),
         name="driver",
-        kwargs={"judge_backend": judge_backend},
+        kwargs={"judge_backend": judge_backend, "observability_provider": observability_provider},
         daemon=True,
     )
     driver_thread.start()
@@ -981,6 +1200,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
         LAUNCHER.cleanup_all()
         if not args.use_external_harness:
             conductor.stop_k8s_proxy()
+        observability_provider.close()
 
         # Stop noise manager if it was enabled
         if args.noise:
@@ -1115,6 +1335,12 @@ if __name__ == "__main__":
         "--noise",
         action="store_true",
         help="Enable transient noise injection via Chaos Mesh during problem runs",
+    )
+    parser.add_argument(
+        "--observability-provider",
+        choices=("none", "splunk"),
+        default="none",
+        help="Optional external observability destination (default: none)",
     )
     parser.add_argument(
         "--internet-access",

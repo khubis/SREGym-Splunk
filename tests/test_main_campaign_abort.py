@@ -1,11 +1,17 @@
 import importlib.util
+import json
 import sys
 import tempfile
+
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+from sregym.observability.base import AttemptContext
+from sregym.run_artifacts import RunArtifacts
 
 
 def _load_main_module():
@@ -96,6 +102,117 @@ def test_judge_preflight_only_when_diagnosis_can_run(monkeypatch, stages, extern
     with pytest.raises(ReachedConductor):
         benchmark_main._run_benchmark(args)
     assert len(calls) == expected_calls
+
+def _assistant_args(**changes):
+    values = {
+        "agent": "assistant_v3",
+        "stages": ["diagnosis"],
+        "suite": "sregym-lite",
+        "problem": None,
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "medium",
+        "judge_model": "fixed-judge",
+        "judge_backend": "api",
+        "observability_provider": "splunk",
+        "profile": "full",
+        "use_external_harness": False,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"stages": None}, "diagnosis-only"),
+        ({"stages": ["diagnosis", "mitigation"]}, "diagnosis-only"),
+        ({"suite": None, "problem": "not-lite"}, "SREGym-Lite"),
+        ({"model": ""}, "model"),
+        ({"reasoning_effort": None}, "reasoning"),
+        ({"reasoning_effort": "minimal"}, "reasoning"),
+        ({"judge_model": None}, "judge model"),
+        ({"judge_backend": ""}, "judge backend"),
+        ({"observability_provider": "none"}, "Splunk"),
+        ({"use_external_harness": True}, "external harness"),
+    ],
+)
+def test_assistant_campaign_requires_explicit_comparable_configuration(changes, message):
+    benchmark_main = _load_main_module()
+    with pytest.raises(ValueError, match=message):
+        benchmark_main.validate_assistant_campaign(_assistant_args(**changes))
+
+
+def test_assistant_campaign_accepts_lite_suite_and_each_registered_lite_case():
+    benchmark_main = _load_main_module()
+    benchmark_main.validate_assistant_campaign(_assistant_args())
+    for problem in benchmark_main.PROBLEM_SETS["sregym-lite"]:
+        benchmark_main.validate_assistant_campaign(_assistant_args(suite=None, problem=problem))
+
+
+def test_assistant_runtime_environment_is_minimal_and_excludes_provider_and_judge_secrets(monkeypatch):
+    benchmark_main = _load_main_module()
+    values = {
+        "ASSISTANT_V3_URL": "https://assistant.example.test",
+        "ASSISTANT_V3_AUTH_TOKEN": "assistant-secret",
+        "SF_TOKEN": "sf-secret",
+        "AGENT_MODEL_ID": "gpt-5.6-luna",
+        "AGENT_REASONING_EFFORT": "medium",
+        "API_PORT": "8000",
+        "SPLUNK_HEC_TOKEN": "hec-secret",
+        "JUDGE_API_KEY": "judge-secret",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    environment = benchmark_main._assistant_runtime_environment()
+
+    assert set(environment) == {
+        "ASSISTANT_V3_URL",
+        "ASSISTANT_V3_AUTH_TOKEN",
+        "SF_TOKEN",
+        "AGENT_MODEL_ID",
+        "AGENT_REASONING_EFFORT",
+        "API_PORT",
+        "SREGYM_ASSISTANT_DRIVER_CONFIG",
+    }
+    assert "hec-secret" not in environment.values()
+    assert "judge-secret" not in environment.values()
+
+
+def test_driver_config_records_opaque_identity_and_comparability_without_secrets(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    monkeypatch.setattr(benchmark_main, "get_profile", lambda: "svelte")
+    monkeypatch.setenv("JUDGE_MODEL_ID", "fixed-judge")
+    run = RunArtifacts.create(
+        staging_root=tmp_path / ".runtime",
+        results_root=tmp_path / "results",
+        problem_id="real-problem-id",
+        agent="assistant_v3",
+        attempt=2,
+    )
+    context = AttemptContext(
+        run_id=run.artifact_id,
+        profile="svelte",
+        comparable=False,
+        attempt_started_at=datetime.now(UTC),
+    )
+    conductor = SimpleNamespace(observability_readiness=None, _observability_context=context)
+    provider = SimpleNamespace(
+        name="splunk",
+        configuration=SimpleNamespace(hec_index="main", hec_token="hec-secret"),
+        _connection_id="logs-connection",
+    )
+
+    benchmark_main._write_assistant_driver_config(run, conductor, "v3", provider, "api")
+
+    payload = json.loads((run.active_dir / "assistant_v3_driver_config.json").read_text())
+    assert payload["run_id"] == run.artifact_id
+    assert payload["attempt"] == 2
+    assert payload["benchmark_profile"] == "svelte"
+    assert payload["comparable"] is False
+    assert payload["judge_model"] == "fixed-judge"
+    assert "real-problem-id" not in json.dumps(payload)
+    assert "hec-secret" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize("platform_failure, expected_attempts", [(True, 1), (False, 3)])

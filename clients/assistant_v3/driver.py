@@ -6,16 +6,20 @@ import hashlib
 import json
 import math
 import os
+import sys
 import tempfile
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from clients.assistant_v3.client import AssistantEvent
-from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt
-from sregym.observability.base import DeliveryReport, ReadinessReport, validate_run_id
+import httpx
+
+from clients.assistant_v3.client import AssistantEvent, AssistantV3Client, AssistantV3Config, AssistantV3Error
+from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt, render_prompt
+from sregym.observability.base import DeliveryReport, ReadinessReport, SignalReadiness, validate_run_id
 
 CAPABILITY_PROFILE = "splunk_o11y_read_only_no_direct_kubernetes"
 
@@ -60,6 +64,162 @@ _REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 
 class ArtifactError(RuntimeError):
     """An artifact could not be validated or persisted safely."""
+
+
+class ConductorError(RuntimeError):
+    """The public Conductor contract was unavailable or inconsistent."""
+
+
+@dataclass(frozen=True)
+class DriverRunConfig:
+    run_id: str
+    attempt: int
+    artifacts_root: Path
+    benchmark_profile: str
+    comparable: bool
+    judge_model: str
+    judge_backend: str
+    observability_provider: str
+    readiness_report: ReadinessReport | None
+    agent_version: str | None = None
+    observability_chart_version: str | None = None
+    hec_index: str | None = None
+    logs_connection_id: str | None = None
+    attempt_started_at: datetime | None = None
+
+    @classmethod
+    def from_file(cls, path: Path) -> DriverRunConfig:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise ArtifactError("Assistant driver configuration is unavailable or invalid") from None
+        if not isinstance(payload, dict):
+            raise ArtifactError("Assistant driver configuration must be an object")
+        readiness_value = payload.get("readiness_report")
+        readiness_report = _readiness_from_dict(readiness_value) if readiness_value is not None else None
+        try:
+            config = cls(
+                run_id=payload["run_id"],
+                attempt=payload["attempt"],
+                artifacts_root=path.parent,
+                benchmark_profile=payload["benchmark_profile"],
+                comparable=payload["comparable"],
+                judge_model=payload["judge_model"],
+                judge_backend=payload["judge_backend"],
+                observability_provider=payload["observability_provider"],
+                readiness_report=readiness_report,
+                agent_version=payload.get("agent_version"),
+                observability_chart_version=payload.get("observability_chart_version"),
+                hec_index=payload.get("hec_index"),
+                logs_connection_id=payload.get("logs_connection_id"),
+                attempt_started_at=(
+                    datetime.fromisoformat(payload["attempt_started_at"].replace("Z", "+00:00"))
+                    if isinstance(payload.get("attempt_started_at"), str)
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise ArtifactError("Assistant driver configuration is incomplete") from None
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        validate_run_id(self.run_id)
+        if self.attempt < 1:
+            raise ArtifactError("attempt number must be positive")
+        if self.benchmark_profile not in {"full", "svelte"}:
+            raise ArtifactError("benchmark profile must be full or svelte")
+        if self.comparable != (self.benchmark_profile == "full"):
+            raise ArtifactError("only the full benchmark profile is comparable")
+        if not self.judge_model.strip() or not self.judge_backend.strip():
+            raise ArtifactError("judge model and backend must be explicit")
+        if self.readiness_report is not None and self.readiness_report.run_id != self.run_id:
+            raise ArtifactError("readiness and driver identities must match")
+        if self.attempt_started_at is not None and (
+            self.attempt_started_at.tzinfo is None
+            or self.attempt_started_at.utcoffset() != UTC.utcoffset(self.attempt_started_at)
+        ):
+            raise ArtifactError("attempt start must be UTC")
+
+
+class ConductorClient:
+    """Minimal client for the three existing public Conductor endpoints."""
+
+    def __init__(self, base_url: str, *, http_client: httpx.Client | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = http_client or httpx.Client(timeout=30)
+        self._owns_client = http_client is None
+        self._submitted = False
+
+    def require_diagnosis(self) -> None:
+        response = self._client.get(f"{self.base_url}/status")
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, UnicodeError):
+            raise ConductorError("Conductor status response is invalid") from None
+        if response.status_code != 200 or not isinstance(payload, dict) or payload.get("stage") != "diagnosis":
+            raise ConductorError("Conductor is not ready for the diagnosis stage")
+
+    def get_prompt_context(self) -> dict[str, str]:
+        response = self._client.get(f"{self.base_url}/get_app")
+        if response.status_code != 200:
+            raise ConductorError("Conductor application metadata is unavailable")
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, UnicodeError):
+            raise ConductorError("Conductor application metadata is invalid") from None
+        if not isinstance(payload, dict):
+            raise ConductorError("Conductor application metadata is invalid")
+        app_name = payload.get("app_name")
+        description = payload.get("descriptions")
+        namespaces = payload.get("namespaces")
+        namespace = payload.get("namespace")
+        if not isinstance(app_name, str) or not isinstance(description, str):
+            raise ConductorError("Conductor application metadata is invalid")
+        if isinstance(namespaces, list) and namespaces and all(isinstance(item, str) for item in namespaces):
+            app_namespace = ", ".join(namespaces)
+        elif isinstance(namespace, str) and namespace:
+            app_namespace = namespace
+        else:
+            raise ConductorError("Conductor application metadata is invalid")
+        return {
+            "app_name": app_name,
+            "app_description": description,
+            "app_namespace": app_namespace,
+        }
+
+    def submit_diagnosis(self, diagnosis: str) -> None:
+        if self._submitted:
+            raise ConductorError("Diagnosis submission was already attempted")
+        self._submitted = True
+        response = self._client.post(
+            f"{self.base_url}/submit",
+            json={"solution": diagnosis, "stage": "diagnosis"},
+        )
+        if response.status_code != 200:
+            raise ConductorError("Conductor diagnosis submission was not accepted")
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+
+def _readiness_from_dict(value: Any) -> ReadinessReport:
+    if not isinstance(value, dict) or not isinstance(value.get("signals"), list):
+        raise ArtifactError("Assistant readiness configuration is invalid")
+    try:
+        signals = tuple(
+            SignalReadiness(
+                signal=item["signal"],
+                ready=item["ready"],
+                checked_at=datetime.fromisoformat(item["checked_at"].replace("Z", "+00:00")),
+                evidence=item["evidence"],
+            )
+            for item in value["signals"]
+        )
+        return ReadinessReport(run_id=value["run_id"], signals=signals, ready=value["ready"])
+    except (KeyError, TypeError, ValueError):
+        raise ArtifactError("Assistant readiness configuration is invalid") from None
 
 
 @dataclass(frozen=True)
@@ -554,6 +714,351 @@ def _atomic_write(path: Path, content: bytes) -> None:
         raise ArtifactError("artifact could not be written atomically") from None
 
 
+_CLIENT_FAILURES: dict[str, FailureClassification] = {
+    "configuration": "configuration_error",
+    "authentication": "authentication_error",
+    "permission": "permission_error",
+    "transient_exhausted": "transient_exhausted",
+    "incomplete_stream": "incomplete_stream",
+    "assistant_error": "assistant_error",
+    "ambiguous_completion": "ambiguous_completion",
+    "capability_policy_violation": "capability_policy_violation",
+}
+
+
+def execute_assistant_attempt(
+    config: DriverRunConfig,
+    *,
+    conductor: ConductorClient,
+    assistant: AssistantV3Client,
+    clock: Callable[[], float] = time.monotonic,
+) -> ArtifactWriteResult:
+    """Run one diagnosis turn and persist success or partial failure artifacts."""
+    config.validate()
+    started_at = datetime.now(UTC)
+    started_clock = clock()
+    rendered: RenderedPrompt | None = None
+    events: tuple[AssistantEvent, ...] = ()
+    event_spool = config.artifacts_root / "assistant_v3" / "events.partial.jsonl"
+    session_id: str | None = None
+    retry_count = 0
+    failure: AssistantFailure | None = None
+    terminal: AssistantTerminal
+    try:
+        conductor.require_diagnosis()
+        rendered = render_prompt(conductor.get_prompt_context())
+        result = assistant.run_session(
+            prompt=rendered.text,
+            request_id=config.run_id,
+            event_sink=lambda item: _append_event_spool(event_spool, item),
+        )
+        events = result.events
+        session_id = result.session_id
+        retry_count = result.retry_count
+        try:
+            conductor.submit_diagnosis(result.final_text)
+        except (ConductorError, httpx.HTTPError):
+            terminal = AssistantTerminal(
+                outcome="ambiguous_completion",
+                session_id=session_id,
+                final_text=None,
+                submitted=False,
+                submission_count=0,
+                resolved_model=assistant.configuration.model,
+                resolved_reasoning=assistant.configuration.reasoning,
+            )
+            failure = AssistantFailure(
+                classification="ambiguous_completion",
+                safe_message="Conductor diagnosis submission could not be confirmed",
+                last_sequence=events[-1].sequence if events else 0,
+                retry_count=retry_count,
+                phase="assistant_execution",
+                cleanup_status="pending",
+            )
+        else:
+            terminal = AssistantTerminal(
+                outcome="completed",
+                session_id=session_id,
+                final_text=result.final_text,
+                submitted=True,
+                submission_count=1,
+                resolved_model=assistant.configuration.model,
+                resolved_reasoning=assistant.configuration.reasoning,
+            )
+    except AssistantV3Error as exc:
+        events = exc.events
+        retry_count = exc.retry_count
+        classification = _CLIENT_FAILURES[exc.kind]
+        terminal = AssistantTerminal(
+            outcome=classification,
+            session_id=session_id,
+            final_text=None,
+            submitted=False,
+            submission_count=0,
+            resolved_model=assistant.configuration.model,
+            resolved_reasoning=assistant.configuration.reasoning,
+        )
+        failure = AssistantFailure(
+            classification=classification,
+            safe_message=str(exc),
+            last_sequence=events[-1].sequence if events else 0,
+            retry_count=retry_count,
+            phase="assistant_execution",
+            cleanup_status="pending",
+        )
+    except (ConductorError, httpx.HTTPError) as exc:
+        terminal = AssistantTerminal(
+            outcome="configuration_error",
+            session_id=None,
+            final_text=None,
+            submitted=False,
+            submission_count=0,
+            resolved_model=assistant.configuration.model,
+            resolved_reasoning=assistant.configuration.reasoning,
+        )
+        failure = AssistantFailure(
+            classification="configuration_error",
+            safe_message=str(exc),
+            last_sequence=0,
+            retry_count=0,
+            phase="assistant_execution",
+            cleanup_status="pending",
+        )
+
+    ended_at = datetime.now(UTC)
+    duration_ms = max(0.0, (clock() - started_clock) * 1000)
+    if rendered is None:
+        # Conductor failures before metadata retrieval still need a deterministic,
+        # provenance-backed request artifact without inventing application facts.
+        rendered = render_prompt(
+            {"app_name": "unavailable", "app_description": "unavailable", "app_namespace": "unavailable"}
+        )
+    request = AssistantRequest(
+        run_id=config.run_id,
+        prompt=rendered,
+        requested_model=assistant.configuration.model,
+        requested_reasoning=assistant.configuration.reasoning,
+    )
+    metadata = AssistantRunMetadata(
+        run_id=config.run_id,
+        attempt=config.attempt,
+        agent_name="assistant_v3",
+        agent_version=config.agent_version,
+        benchmark_profile=config.benchmark_profile,
+        comparable=config.comparable,
+        capability_profile=CAPABILITY_PROFILE,
+        requested_model=assistant.configuration.model,
+        resolved_model=assistant.configuration.model,
+        requested_reasoning=assistant.configuration.reasoning,
+        resolved_reasoning=assistant.configuration.reasoning,
+        judge_model=config.judge_model,
+        judge_backend=config.judge_backend,
+        prompt_provenance=rendered.provenance,
+        observability_provider=config.observability_provider,
+        observability_chart_version=config.observability_chart_version,
+        hec_index=config.hec_index,
+        logs_connection_id=config.logs_connection_id,
+        readiness_report=config.readiness_report,
+        attempt_started_at=config.attempt_started_at or started_at,
+        agent_started_at=started_at,
+        agent_ended_at=ended_at,
+        classification=terminal.outcome,
+    )
+    write_result = AssistantArtifactStore(
+        config.artifacts_root,
+        secrets=(assistant.configuration.auth_token, assistant.configuration.sf_token),
+    ).write(
+        AssistantArtifactBundle(
+            request=request,
+            events=events,
+            terminal=terminal,
+            metadata=metadata,
+            agent_duration_ms=duration_ms,
+            failure=failure,
+            retry_count=retry_count,
+            cleanup_status="pending",
+        )
+    )
+    event_spool.unlink(missing_ok=True)
+    return write_result
+
+
+def _append_event_spool(path: Path, event: AssistantEvent) -> None:
+    """Durably retain each redacted event before terminal interpretation."""
+    record = {
+        "sequence": event.sequence,
+        "offset_ms": event.offset_ms,
+        "event": event.event,
+        "event_id": event.event_id,
+        "data": event.data,
+        "redacted": event.redacted,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab") as spool:
+            spool.write((_canonical_json(record) + "\n").encode())
+            spool.flush()
+            os.fsync(spool.fileno())
+    except OSError:
+        raise ArtifactError("Assistant event spool could not be written") from None
+
+
+def write_pre_agent_failure(
+    config: DriverRunConfig,
+    *,
+    assistant_configuration: AssistantV3Config,
+    safe_message: str,
+    prompt_context: Mapping[str, str],
+) -> ArtifactWriteResult:
+    """Persist an infrastructure-invalid attempt that never launched Assistant."""
+    config.validate()
+    rendered = render_prompt(prompt_context)
+    timestamp = datetime.now(UTC)
+    terminal = AssistantTerminal(
+        outcome="infrastructure_invalid",
+        session_id=None,
+        final_text=None,
+        submitted=False,
+        submission_count=0,
+        resolved_model=None,
+        resolved_reasoning=None,
+    )
+    failure = AssistantFailure(
+        classification="infrastructure_invalid",
+        safe_message=safe_message,
+        last_sequence=0,
+        retry_count=0,
+        phase="provider_preflight",
+        cleanup_status="completed",
+    )
+    metadata = AssistantRunMetadata(
+        run_id=config.run_id,
+        attempt=config.attempt,
+        agent_name="assistant_v3",
+        agent_version=config.agent_version,
+        benchmark_profile=config.benchmark_profile,
+        comparable=config.comparable,
+        capability_profile=CAPABILITY_PROFILE,
+        requested_model=assistant_configuration.model,
+        resolved_model=None,
+        requested_reasoning=assistant_configuration.reasoning,
+        resolved_reasoning=None,
+        judge_model=config.judge_model,
+        judge_backend=config.judge_backend,
+        prompt_provenance=rendered.provenance,
+        observability_provider=config.observability_provider,
+        observability_chart_version=config.observability_chart_version,
+        hec_index=config.hec_index,
+        logs_connection_id=config.logs_connection_id,
+        readiness_report=config.readiness_report,
+        attempt_started_at=config.attempt_started_at or timestamp,
+        agent_started_at=None,
+        agent_ended_at=None,
+        classification="infrastructure_invalid",
+    )
+    return AssistantArtifactStore(
+        config.artifacts_root,
+        secrets=(assistant_configuration.auth_token, assistant_configuration.sf_token),
+    ).write(
+        AssistantArtifactBundle(
+            request=AssistantRequest(
+                run_id=config.run_id,
+                prompt=rendered,
+                requested_model=assistant_configuration.model,
+                requested_reasoning=assistant_configuration.reasoning,
+            ),
+            events=(),
+            terminal=terminal,
+            metadata=metadata,
+            agent_duration_ms=0.0,
+            failure=failure,
+            cleanup_status="completed",
+        )
+    )
+
+
+def finalize_attempt_artifacts(
+    root: Path,
+    *,
+    delivery: DeliveryReport | None,
+    cleanup_status: CleanupStatus,
+    infrastructure_error: str | None = None,
+) -> None:
+    """Attach trusted post-agent delivery/cleanup evidence without rewriting the trace."""
+    if cleanup_status not in _CLEANUP_STATUSES:
+        raise ArtifactError("invalid cleanup status")
+    metadata_path = root / "run_metadata.json"
+    terminal_path = root / "assistant_v3" / "terminal.json"
+    events_path = root / "assistant_v3" / "events.jsonl"
+    try:
+        metadata_value = json.loads(metadata_path.read_text(encoding="utf-8"))
+        terminal_value = json.loads(terminal_path.read_text(encoding="utf-8"))
+        event_lines = events_path.read_text(encoding="utf-8").splitlines()[1:]
+    except (OSError, json.JSONDecodeError, TypeError):
+        raise ArtifactError("Assistant artifacts are unavailable for finalization") from None
+    if not isinstance(metadata_value, dict) or not isinstance(terminal_value, dict):
+        raise ArtifactError("Assistant artifacts are invalid for finalization")
+
+    invalid_delivery = infrastructure_error is not None or (delivery is not None and not delivery.valid)
+    failure_path = root / "failure.json"
+    failure_value: dict[str, Any] | None = None
+    if failure_path.exists():
+        try:
+            loaded_failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise ArtifactError("Assistant failure artifact is invalid") from None
+        if not isinstance(loaded_failure, dict):
+            raise ArtifactError("Assistant failure artifact is invalid")
+        failure_value = loaded_failure
+
+    if invalid_delivery:
+        metadata_value["classification"] = "infrastructure_invalid"
+        metadata_value["included_in_diagnosis_pass_rate"] = False
+        failure_value = AssistantFailure(
+            classification="infrastructure_invalid",
+            safe_message=infrastructure_error or "Post-execution telemetry delivery verification failed",
+            last_sequence=len(event_lines),
+            retry_count=0,
+            phase="delivery",
+            cleanup_status=cleanup_status,
+        ).as_dict()
+    elif failure_value is not None:
+        failure_value["cleanup_status"] = cleanup_status
+
+    _atomic_write(metadata_path, _json_bytes(metadata_value))
+    if delivery is not None:
+        _atomic_write(root / "observability" / "delivery.json", _json_bytes(asdict(delivery)))
+    if failure_value is not None:
+        _atomic_write(failure_path, _json_bytes(failure_value))
+
+
+def run_preflight() -> None:
+    """Validate Assistant configuration and authenticated connectivity."""
+    configuration = AssistantV3Config.from_env()
+    client = AssistantV3Client(configuration)
+    try:
+        client.preflight(request_id="anon_00000000000000000000000000000000")
+    finally:
+        client.close()
+
+
+def main() -> int:
+    """Run the registry-launched Assistant driver for one prepared attempt."""
+    config_path = Path(os.environ.get("SREGYM_ASSISTANT_DRIVER_CONFIG", "/logs/assistant_v3_driver_config.json"))
+    config = DriverRunConfig.from_file(config_path)
+    assistant_configuration = AssistantV3Config.from_env()
+    api_host = os.environ.get("API_HOSTNAME", "localhost")
+    api_port = os.environ.get("API_PORT", "8000")
+    conductor = ConductorClient(f"http://{api_host}:{api_port}")
+    assistant = AssistantV3Client(assistant_configuration)
+    try:
+        result = execute_assistant_attempt(config, conductor=conductor, assistant=assistant)
+    finally:
+        assistant.close()
+        conductor.close()
+    return 0 if result.classification == "completed" else 1
+
+
 __all__ = [
     "CAPABILITY_PROFILE",
     "ArtifactError",
@@ -565,9 +1070,25 @@ __all__ = [
     "AssistantRequest",
     "AssistantRunMetadata",
     "AssistantTerminal",
+    "ConductorClient",
+    "ConductorError",
     "CleanupStatus",
+    "DriverRunConfig",
     "FailureClassification",
     "FailurePhase",
     "TerminalOutcome",
     "derive_metrics",
+    "execute_assistant_attempt",
+    "finalize_attempt_artifacts",
+    "main",
+    "run_preflight",
+    "write_pre_agent_failure",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through main()
+    try:
+        raise SystemExit(main())
+    except (ArtifactError, AssistantV3Error, ConductorError) as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None

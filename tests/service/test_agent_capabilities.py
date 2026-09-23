@@ -139,6 +139,48 @@ def test_restricted_capabilities_require_container_isolation():
         asyncio.run(launcher.ensure_started(registration))
 
 
+def test_filtered_assistant_allows_only_product_and_conductor_endpoints():
+    runner = ContainerRunner(
+        ContainerConfig(
+            internet_policy=InternetPolicy.from_mode(
+                "filtered",
+                agent_name="assistant_v3",
+                model_id="gpt-5.6-luna",
+            ),
+            kubernetes_access=False,
+            sregym_mcp_access=False,
+        )
+    )
+    environment = {
+        "API_PORT": "8000",
+        "ASSISTANT_V3_URL": "https://assistant.example.test",
+    }
+
+    rules = runner._configured_egress_rules(environment)
+
+    assert set(rules) == {
+        EndpointRule("host.docker.internal", 8000, inspect_tools=False),
+        EndpointRule("assistant.example.test", 443),
+    }
+
+
+def test_filtered_assistant_requires_explicit_product_endpoint():
+    runner = ContainerRunner(
+        ContainerConfig(
+            internet_policy=InternetPolicy.from_mode(
+                "filtered",
+                agent_name="assistant_v3",
+                model_id="gpt-5.6-luna",
+            ),
+            kubernetes_access=False,
+            sregym_mcp_access=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="ASSISTANT_V3_URL"):
+        runner._configured_egress_rules({"API_PORT": "8000"})
+
+
 def test_capability_configuration_without_container_runner_is_safe(monkeypatch):
     launcher = AgentLauncher()
     registration = AgentRegistration(name="stratus", kickoff_command="run-agent")
