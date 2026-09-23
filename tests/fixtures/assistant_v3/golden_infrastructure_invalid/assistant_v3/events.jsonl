@@ -1,0 +1,12 @@
+{"problem_id":"anon_0123456789abcdef0123456789abcdef","schema":"sregym.assistant_v3.events.v1"}
+{"data":{"timestamp":"2026-09-23T12:00:00Z"},"event":"ping","event_id":null,"offset_ms":10.0,"redacted":false,"sequence":1}
+{"data":{"id":"call-1","input":{},"name":"o11y_apm_fetch"},"event":"tool.use","event_id":"evt-2","offset_ms":20.0,"redacted":false,"sequence":2}
+{"data":{"id":"call-1","input":{},"name":"o11y_apm_fetch"},"event":"tool.use","event_id":null,"offset_ms":25.0,"redacted":false,"sequence":3}
+{"data":{"text":"same text"},"event":"message.delta","event_id":null,"offset_ms":30.0,"redacted":false,"sequence":4}
+{"data":{"text":"same text"},"event":"message.delta","event_id":null,"offset_ms":35.0,"redacted":false,"sequence":5}
+{"data":{"action_id":"action-2","status":"running","tool_name":"analyze_table"},"event":"assistant.subagent.action","event_id":null,"offset_ms":40.0,"redacted":false,"sequence":6}
+{"data":{"action_id":"action-2","is_error":true,"status":"complete","tool_name":"analyze_table"},"event":"assistant.subagent.action","event_id":null,"offset_ms":50.0,"redacted":false,"sequence":7}
+{"data":{"content":"failed","is_error":true,"tool_use_id":"call-1"},"event":"tool.result","event_id":null,"offset_ms":60.0,"redacted":false,"sequence":8}
+{"data":{"content":"failed","is_error":true,"tool_use_id":"call-1"},"event":"tool.result","event_id":null,"offset_ms":65.0,"redacted":false,"sequence":9}
+{"data":{"session_usage":null,"usage":{"input_tokens":100,"output_tokens":25,"reasoning_tokens":null,"total_tokens":125}},"event":"assistant.usage","event_id":null,"offset_ms":90.0,"redacted":false,"sequence":10}
+{"data":{"final_text":"Root cause: dependency saturation."},"event":"message.complete","event_id":null,"offset_ms":100.0,"redacted":false,"sequence":11}

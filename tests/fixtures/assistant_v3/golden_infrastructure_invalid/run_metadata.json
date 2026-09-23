@@ -1,0 +1,77 @@
+{
+  "agent_ended_at": "2026-09-23T12:00:01.120Z",
+  "agent_name": "assistant_v3",
+  "agent_started_at": "2026-09-23T12:00:01.000Z",
+  "agent_version": "v3-test",
+  "attempt": 1,
+  "attempt_started_at": "2026-09-23T12:00:00.000Z",
+  "benchmark_profile": "full",
+  "capability_profile": "splunk_o11y_read_only_no_direct_kubernetes",
+  "classification": "infrastructure_invalid",
+  "comparable": true,
+  "hec_index": "main",
+  "included_in_diagnosis_pass_rate": false,
+  "judge_backend": "openai-compatible",
+  "judge_model": "judge-model-fixed",
+  "logs_connection_id": "logs-connection-1",
+  "observability_chart_version": "0.160.0",
+  "observability_provider": "splunk",
+  "problem_id": "anon_0123456789abcdef0123456789abcdef",
+  "prompt_provenance": {
+    "profile_id": "sregym-stratus-diagnosis-v1",
+    "profile_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "reference_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "rendered_sha256": "a6ec8e7c974f678b75d0860fbb6631c7aefcde7e0a98a883ec68f3290fc5030d",
+    "source_commit": "3f6bd041231715184f962cedb33cfbcefa9b5b3d",
+    "source_file_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "source_path": "agents/stratus/src/stratus/prompts/diagnosis_agent_prompts.yaml",
+    "substitution_ids": [
+      "remove-kubernetes-enumeration"
+    ],
+    "template_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "readiness_report": {
+    "ready": true,
+    "run_id": "anon_0123456789abcdef0123456789abcdef",
+    "signals": [
+      {
+        "checked_at": "2026-09-23T12:00:00.000Z",
+        "evidence": {
+          "count": 1
+        },
+        "ready": true,
+        "signal": "metrics"
+      },
+      {
+        "checked_at": "2026-09-23T12:00:00.000Z",
+        "evidence": {
+          "count": 1
+        },
+        "ready": true,
+        "signal": "traces"
+      },
+      {
+        "checked_at": "2026-09-23T12:00:00.000Z",
+        "evidence": {
+          "count": 1
+        },
+        "ready": true,
+        "signal": "logs"
+      },
+      {
+        "checked_at": "2026-09-23T12:00:00.000Z",
+        "evidence": {
+          "count": 1
+        },
+        "ready": true,
+        "signal": "kubernetes_events"
+      }
+    ]
+  },
+  "requested_model": "gpt-5.6-luna",
+  "requested_reasoning": "medium",
+  "resolved_model": "gpt-5.6-luna",
+  "resolved_reasoning": "medium",
+  "run_id": "anon_0123456789abcdef0123456789abcdef",
+  "schema": "sregym.assistant_v3.run_metadata.v1"
+}

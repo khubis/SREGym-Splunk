@@ -1,0 +1,10 @@
+{
+  "final_text": "Root cause: dependency saturation.",
+  "outcome": "completed",
+  "resolved_model": "gpt-5.6-luna",
+  "resolved_reasoning": "medium",
+  "schema": "sregym.assistant_v3.terminal.v1",
+  "session_id": "asst_v3_fixture",
+  "submission_count": 1,
+  "submitted": true
+}

@@ -1,0 +1,10 @@
+{
+  "classification": "infrastructure_invalid",
+  "cleanup_status": "completed",
+  "included_in_diagnosis_pass_rate": false,
+  "last_sequence": 11,
+  "phase": "delivery",
+  "retry_count": 0,
+  "safe_message": "Post-execution telemetry delivery verification failed",
+  "schema": "sregym.assistant_v3.failure.v1"
+}
