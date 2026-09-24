@@ -175,6 +175,8 @@ Traceability is a live checklist: each row names the focused test locations that
 - [ ] **N3. Verify one isolated end-to-end case** — Run the existing live case, inspect its prompt, execution scope, tool trace, diagnosis, judge result, and delivery report, and confirm no foreign run was used.
 - [ ] **N4. Run the ten-case pilot** — Run the first ten registered Lite cases once each and sequentially. Resume rather than duplicate after interruption. Report per-case validity, score, duration, tokens, tool calls, and failed tool calls; aggregate scores only across valid attempts.
 
+Live target note: source `/Users/khubishah/Documents/assistant/.env` and derive the run configuration only from its `SYNTHETIC_*` variables. Map `SYNTHETIC_REALM`, `SYNTHETIC_ORG_ID`, and `SYNTHETIC_USER_ID` to the Assistant runtime identity. Live preflight on 2026-09-24 verified `SYNTHETIC_SPLUNK_ACCESS_TOKEN` for both target-realm query access and OTLP ingest, so map it to `SF_TOKEN` and `SPLUNK_O11Y_INGEST_TOKEN`. `SYNTHETIC_SF_TOKEN` returned 401 for both target-realm endpoints and must not replace the verified token unless its intended role or value is corrected. Never fall back to the non-synthetic org variables for this campaign.
+
 ## Commit and Upstream Strategy
 
 - Commits A–F contain no `clients.assistant_v3` import and are candidates for an upstream PR in order: coverage foundation, provider lifecycle, capability declarations, OTLP fan-out, secure Splunk export, delivery verification.
