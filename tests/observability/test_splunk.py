@@ -28,6 +28,7 @@ from sregym.observability.splunk import (
 RUN_ID = "anon_0123456789abcdef0123456789abcdef"
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
 ACCESS_TOKEN = "access-token-value"
+INGEST_TOKEN = "ingest-token-value"
 HEC_TOKEN = "hec-token-value"
 SIGNALS = ("metrics", "traces", "logs", "kubernetes_events")
 
@@ -35,6 +36,7 @@ SIGNALS = ("metrics", "traces", "logs", "kubernetes_events")
 def valid_environment(**overrides: str) -> dict[str, str]:
     environment = {
         "SF_TOKEN": ACCESS_TOKEN,
+        "SPLUNK_O11Y_INGEST_TOKEN": INGEST_TOKEN,
         "SFX_REALM": "us0",
         "SPLUNK_HOST": "http-inputs.example.splunkcloud.com",
         "SPLUNK_HEC_PORT": "8088",
@@ -156,7 +158,14 @@ def prepared_provider(
 
 @pytest.mark.parametrize(
     "missing",
-    ("SF_TOKEN", "SFX_REALM", "SPLUNK_HOST", "SPLUNK_HEC_PORT", "SPLUNK_HEC_TOKEN"),
+    (
+        "SF_TOKEN",
+        "SPLUNK_O11Y_INGEST_TOKEN",
+        "SFX_REALM",
+        "SPLUNK_HOST",
+        "SPLUNK_HEC_PORT",
+        "SPLUNK_HEC_TOKEN",
+    ),
 )
 def test_config_requires_every_credential_without_echoing_values(missing):
     environment = valid_environment()
@@ -168,6 +177,7 @@ def test_config_requires_every_credential_without_echoing_values(missing):
     assert raised.value.kind == "configuration"
     assert missing in str(raised.value)
     assert ACCESS_TOKEN not in str(raised.value)
+    assert INGEST_TOKEN not in str(raised.value)
     assert HEC_TOKEN not in str(raised.value)
 
 
@@ -185,6 +195,7 @@ def test_config_builds_https_hec_endpoint_and_safe_metadata():
     }
     encoded = json.dumps(config.artifact_metadata(), sort_keys=True) + repr(config)
     assert ACCESS_TOKEN not in encoded
+    assert INGEST_TOKEN not in encoded
     assert HEC_TOKEN not in encoded
 
 
@@ -273,7 +284,7 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     secret = secret_call.kwargs["body"]
     assert secret.metadata.name == SECRET_NAME
     assert secret.string_data == {
-        "splunk_observability_access_token": ACCESS_TOKEN,
+        "splunk_observability_access_token": INGEST_TOKEN,
         "splunk_platform_hec_token": HEC_TOKEN,
     }
     assert len(commands) == 1
@@ -298,6 +309,7 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     }
     rendered_inputs = json.dumps({"command": command, "stdin": stdin, "export": first.endpoint})
     assert ACCESS_TOKEN not in rendered_inputs
+    assert INGEST_TOKEN not in rendered_inputs
     assert HEC_TOKEN not in rendered_inputs
 
 

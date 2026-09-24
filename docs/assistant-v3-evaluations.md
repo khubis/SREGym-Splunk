@@ -25,12 +25,13 @@ Keep credentials in the process environment or a gitignored local `.env`. The ru
 |---|---|
 | `ASSISTANT_V3_URL` | Existing Assistant v3 base URL; HTTPS except loopback development |
 | `ASSISTANT_V3_AUTH_TOKEN` | Assistant bearer token |
-| `SF_TOKEN` | Splunk Observability Cloud access token used by Assistant and provider queries |
+| `SF_TOKEN` | Splunk Observability Cloud user/API token used by Assistant and provider queries |
+| `SPLUNK_O11Y_INGEST_TOKEN` | Splunk Observability Cloud org token with `INGEST` scope, used only by the collector |
 | `SFX_REALM` | Splunk Observability Cloud realm |
 | `SPLUNK_HOST` | HEC hostname only, without scheme, port, or path |
 | `SPLUNK_HEC_PORT` | Numeric TLS HEC port |
 | `SPLUNK_HEC_TOKEN` | HEC token for container logs and Kubernetes events |
-| `SPLUNK_HEC_INDEX` | Optional HEC index; defaults to `main` |
+| `SPLUNK_HEC_INDEX` | Optional HEC index; defaults to `main` and must be allowed by the HEC token |
 | `JUDGE_API_BASE` | Judge endpoint when the selected API backend requires one |
 | `JUDGE_API_KEY` | Judge credential when the selected API backend requires one |
 | `SSL_CERT_FILE` | Optional readable CA bundle for Dockerized CLI judges behind enterprise TLS inspection |

@@ -39,7 +39,14 @@ RELEASE_NAME = "sregym-splunk-otel"
 NAMESPACE = "sregym-observability"
 SECRET_NAME = "sregym-splunk-otel-credentials"
 _HELM_TIMEOUT = "5m"
-_REQUIRED_ENV = ("SF_TOKEN", "SFX_REALM", "SPLUNK_HOST", "SPLUNK_HEC_PORT", "SPLUNK_HEC_TOKEN")
+_REQUIRED_ENV = (
+    "SF_TOKEN",
+    "SPLUNK_O11Y_INGEST_TOKEN",
+    "SFX_REALM",
+    "SPLUNK_HOST",
+    "SPLUNK_HEC_PORT",
+    "SPLUNK_HEC_TOKEN",
+)
 _HOST_PATTERN = re.compile(
     r"(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\Z"
 )
@@ -560,6 +567,7 @@ class SplunkConfig:
     """Validated destination configuration with secret-safe representation."""
 
     access_token: str = field(repr=False)
+    ingest_token: str = field(repr=False)
     realm: str
     hec_host: str
     hec_port: int
@@ -591,6 +599,7 @@ class SplunkConfig:
 
         return cls(
             access_token=source["SF_TOKEN"].strip(),
+            ingest_token=source["SPLUNK_O11Y_INGEST_TOKEN"].strip(),
             realm=realm,
             hec_host=host,
             hec_port=port,
@@ -1070,7 +1079,7 @@ class SplunkObservabilityProvider:
         secret = client.V1Secret(
             metadata=client.V1ObjectMeta(name=SECRET_NAME, namespace=NAMESPACE),
             string_data={
-                "splunk_observability_access_token": self.configuration.access_token,
+                "splunk_observability_access_token": self.configuration.ingest_token,
                 "splunk_platform_hec_token": self.configuration.hec_token,
             },
             type="Opaque",

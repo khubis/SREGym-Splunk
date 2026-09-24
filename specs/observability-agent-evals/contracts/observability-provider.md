@@ -93,12 +93,13 @@ The `none` provider returns `None`, performs no Kubernetes/network calls, and pr
 
 | Variable | Required | Use |
 |---|---:|---|
-| `SF_TOKEN` | yes | Splunk Observability ingest/query access |
+| `SF_TOKEN` | yes | Splunk Observability user/API token for readiness queries |
+| `SPLUNK_O11Y_INGEST_TOKEN` | yes | Splunk Observability org token with `INGEST` scope for collector export |
 | `SFX_REALM` | yes | Splunk Observability realm |
 | `SPLUNK_HOST` | yes | HEC hostname only; no embedded credentials |
 | `SPLUNK_HEC_PORT` | yes | Numeric HEC TLS port |
 | `SPLUNK_HEC_TOKEN` | yes | Container logs/Kubernetes events via HEC |
-| `SPLUNK_HEC_INDEX` | no | Logs index; defaults to `main` and is recorded |
+| `SPLUNK_HEC_INDEX` | no | Logs index; defaults to `main`, must be allowed by the HEC token, and is recorded |
 
 The provider CLI selection is `--observability-provider none|splunk`, default `none`. The logs connection is resolved exactly as Assistant resolves it: accessible default first, otherwise first accessible connection; no connection hint is added to the model prompt. No provider credential is forwarded to unrelated agent containers.
 
