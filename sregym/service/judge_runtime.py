@@ -98,6 +98,7 @@ def managed_judge_backend(backend: str = "api", *, force_build: bool = False) ->
             env_vars=env,
             forward_host_credentials=False,
             codex_auth="shared" if backend == "codex" else "none",
+            trusted_ca_bundle=Path(os.environ["SSL_CERT_FILE"]) if os.environ.get("SSL_CERT_FILE") else None,
             published_ports=[f"127.0.0.1::{BRIDGE_PORT}"],
         )
     )

@@ -4,7 +4,7 @@
 
 | Input | Source | Rule |
 |---|---|---|
-| Assistant base URL | `ASSISTANT_V3_URL` | Required HTTPS URL, except loopback HTTP in local development |
+| Assistant base URL | `ASSISTANT_V3_URL` | Required HTTPS URL, except loopback HTTP in local development; the exact Docker host alias is loopback-equivalent after container rewriting |
 | Assistant bearer token | `ASSISTANT_V3_AUTH_TOKEN` | Required; sent only in `Authorization: Bearer ...` |
 | Splunk access token | `SF_TOKEN` | Required; sent only as `X-SF-TOKEN` |
 | Agent model | `AGENT_MODEL_ID` | Required and sent explicitly |
@@ -12,6 +12,8 @@
 | Prompt profile | `ASSISTANT_V3_PROMPT_PROFILE` | Defaults to immutable `sregym-stratus-diagnosis-v1` |
 
 The `assistant_v3` registration sets `kubernetes_access: false` and `sregym_mcp_access: false`. The launcher must therefore omit the kubeconfig mount/environment and MCP URL/filtered-egress rule for both preflight and run containers. Both registration fields default to `true` for every existing agent. The container credential allowlist adds only the URL and two tokens above. `JUDGE_*`, HEC token, and provider deployment credentials are not Assistant inputs.
+
+An optional host `SSL_CERT_FILE` is a runner/judge transport input, not an Assistant credential. When present for an open-network CLI judge, the runner accepts only a readable regular non-symlink file, mounts that exact file read-only, and points standard TLS client variables at the container path. It never disables certificate verification or mounts a host trust directory.
 
 ## Preflight
 
@@ -33,7 +35,7 @@ Accept: text/event-stream
 Content-Type: application/json
 Authorization: Bearer <ASSISTANT_V3_AUTH_TOKEN>
 X-SF-TOKEN: <SF_TOKEN>
-X-Request-ID: <opaque run id>
+X-Request-ID: <UUID derived deterministically from the anonymous run id>
 ```
 
 ```json

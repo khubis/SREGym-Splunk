@@ -163,6 +163,51 @@ def test_host_ca_bundle_is_available():
     assert _find_host_ca_bundle().is_file()
 
 
+def test_open_runner_mounts_explicit_trusted_ca_bundle_read_only(tmp_path):
+    ca_bundle = tmp_path / "corporate-ca-bundle.pem"
+    ca_bundle.write_text("trusted certificates")
+    runner = ContainerRunner(
+        ContainerConfig(
+            internet_policy=InternetPolicy.from_mode("open"),
+            trusted_ca_bundle=ca_bundle,
+        )
+    )
+
+    args = runner._build_base_docker_args()
+    env = dict(item.split("=", 1) for item in runner._build_env_flags()[1::2])
+
+    assert f"{ca_bundle}:/etc/sregym/trusted-ca-bundle.pem:ro" in args
+    assert env["SSL_CERT_FILE"] == "/etc/sregym/trusted-ca-bundle.pem"
+    assert env["REQUESTS_CA_BUNDLE"] == "/etc/sregym/trusted-ca-bundle.pem"
+    assert env["CURL_CA_BUNDLE"] == "/etc/sregym/trusted-ca-bundle.pem"
+    assert env["NODE_EXTRA_CA_CERTS"] == "/etc/sregym/trusted-ca-bundle.pem"
+
+
+def test_open_runner_rejects_unreadable_or_linked_trusted_ca_bundle(tmp_path):
+    missing = tmp_path / "missing.pem"
+    runner = ContainerRunner(
+        ContainerConfig(
+            internet_policy=InternetPolicy.from_mode("open"),
+            trusted_ca_bundle=missing,
+        )
+    )
+    with pytest.raises(ValueError, match="trusted CA bundle"):
+        runner._build_base_docker_args()
+
+    target = tmp_path / "target.pem"
+    target.write_text("trusted certificates")
+    link = tmp_path / "linked.pem"
+    link.symlink_to(target)
+    runner = ContainerRunner(
+        ContainerConfig(
+            internet_policy=InternetPolicy.from_mode("open"),
+            trusted_ca_bundle=link,
+        )
+    )
+    with pytest.raises(ValueError, match="trusted CA bundle"):
+        runner._build_base_docker_args()
+
+
 def test_filtered_runner_uses_private_network_and_proxy(tmp_path):
     runner = ContainerRunner(
         ContainerConfig(

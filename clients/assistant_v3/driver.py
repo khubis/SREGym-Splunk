@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, get_args
+from uuid import UUID
 
 import httpx
 
@@ -60,6 +61,7 @@ _FAILURE_CLASSIFICATIONS = frozenset(get_args(FailureClassification))
 _FAILURE_PHASES = frozenset(get_args(FailurePhase))
 _CLEANUP_STATUSES = frozenset(get_args(CleanupStatus))
 _REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+_PREFLIGHT_REQUEST_ID = "00000000-0000-0000-0000-000000000000"
 
 
 class ArtifactError(RuntimeError):
@@ -68,6 +70,12 @@ class ArtifactError(RuntimeError):
 
 class ConductorError(RuntimeError):
     """The public Conductor contract was unavailable or inconsistent."""
+
+
+def _assistant_request_id(run_id: str) -> str:
+    """Format the anonymous SRE Gym identity for Assistant's UUID header contract."""
+    validate_run_id(run_id)
+    return str(UUID(hex=run_id.removeprefix("anon_")))
 
 
 @dataclass(frozen=True)
@@ -749,7 +757,7 @@ def execute_assistant_attempt(
         rendered = render_prompt(conductor.get_prompt_context())
         result = assistant.run_session(
             prompt=rendered.text,
-            request_id=config.run_id,
+            request_id=_assistant_request_id(config.run_id),
             event_sink=lambda item: _append_event_spool(event_spool, item),
         )
         events = result.events
@@ -1037,7 +1045,7 @@ def run_preflight() -> None:
     configuration = AssistantV3Config.from_env()
     client = AssistantV3Client(configuration)
     try:
-        client.preflight(request_id="anon_00000000000000000000000000000000")
+        client.preflight(request_id=_PREFLIGHT_REQUEST_ID)
     finally:
         client.close()
 

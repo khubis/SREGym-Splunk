@@ -826,6 +826,7 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert session_request["reasoning"] == "medium"
     assert "surface" not in session_request
     assert "oracle" not in session_request["prompt"]
+    assert requests[2].headers["X-Request-ID"] == "01234567-89ab-cdef-0123-456789abcdef"
     assert json.loads(requests[3].content) == {
         "solution": "The checkout dependency is saturated.",
         "stage": "diagnosis",
@@ -1264,7 +1265,7 @@ def test_preflight_closes_client_on_success_and_failure(monkeypatch: pytest.Monk
     monkeypatch.setattr(driver_module, "AssistantV3Client", Mock(return_value=client))
 
     driver_module.run_preflight()
-    client.preflight.assert_called_once_with(request_id="anon_00000000000000000000000000000000")
+    client.preflight.assert_called_once_with(request_id="00000000-0000-0000-0000-000000000000")
     client.close.assert_called_once()
 
     client.reset_mock()
@@ -1434,6 +1435,7 @@ def test_assistant_v3_workflow_documents_reproducible_bounded_commands() -> None
         "--judge-backend api",
         "--observability-provider splunk",
         "--allow-agent-endpoint \"$ASSISTANT_V3_URL\"",
+        "--force-build",
         "splunk_o11y_read_only_no_direct_kubernetes",
         "included_in_diagnosis_pass_rate",
         "results/<batch>/assistant_v3/<problem_id>/run_<attempt>/",

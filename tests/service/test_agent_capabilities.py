@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -8,6 +9,12 @@ from sregym.agent_launcher import AgentLauncher
 from sregym.agent_registry import AgentRegistration
 from sregym.service.container_runner import ContainerConfig, ContainerRunner
 from sregym.service.internet_policy import EndpointRule, InternetPolicy
+
+
+def test_agent_image_packages_assistant_v3_runtime_dependencies():
+    dockerfile = (Path(__file__).parents[2] / "docker/agents/Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY sregym/observability/" in dockerfile
 
 
 def write_kubeconfig(path):
@@ -189,3 +196,27 @@ def test_capability_configuration_without_container_runner_is_safe(monkeypatch):
     monkeypatch.setattr("sregym.agent_launcher.importlib.import_module", Mock(return_value=Mock(run_preflight=Mock())))
     with pytest.raises(RuntimeError, match="container runner is required"):
         launcher._run_preflight(registration)
+
+
+def test_public_capability_configuration_restricts_preflight_runner():
+    launcher = AgentLauncher()
+    launcher._container_runner = ContainerRunner(ContainerConfig())
+    registration = AgentRegistration(
+        name="assistant_v3",
+        kubernetes_access=False,
+        sregym_mcp_access=False,
+    )
+
+    launcher.configure_agent_capabilities(registration)
+
+    assert launcher._container_runner.config.kubernetes_access is False
+    assert launcher._container_runner.config.sregym_mcp_access is False
+    assert launcher._container_runner.config.kubeconfig_path is None
+
+
+def test_agent_preflight_skips_driver_without_preflight_hook(monkeypatch):
+    launcher = AgentLauncher()
+    launcher._container_runner = ContainerRunner(ContainerConfig())
+    monkeypatch.setattr("sregym.agent_launcher.importlib.import_module", Mock(return_value=object()))
+
+    launcher._run_preflight(AgentRegistration(name="codex"))

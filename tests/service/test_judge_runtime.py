@@ -194,6 +194,35 @@ def test_codex_uses_only_selected_subscription_file(docker, monkeypatch, tmp_pat
         assert json.loads(path.read_text()) == auth
 
 
+def test_codex_judge_mounts_selected_signed_policy_caches_read_only(docker, monkeypatch, tmp_path):
+    codex_home = tmp_path / "selected-codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "auth.json").write_text('{"tokens": {"access_token": "selected-profile"}}')
+    cache_names = ("cloud-config-bundle-cache.json", "cloud-requirements-cache.json")
+    for name in cache_names:
+        (codex_home / name).write_text('{"signature": "signed", "signed_payload": "payload"}')
+    (codex_home / "config.toml").write_text('model = "must-not-be-mounted"')
+
+    with runtime.managed_judge_backend("codex"):
+        command = runtime.subprocess.Popen.call_args.args[0]
+        for name in cache_names:
+            assert f"{codex_home / name}:/root/.codex/{name}:ro" in command
+        assert not any("config.toml" in argument for argument in command)
+
+
+def test_cli_judge_uses_explicit_host_ca_bundle(docker, monkeypatch, tmp_path):
+    ca_bundle = tmp_path / "host-ca-bundle.pem"
+    ca_bundle.write_text("trusted certificates")
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_bundle))
+
+    with runtime.managed_judge_backend("codex"):
+        command = runtime.subprocess.Popen.call_args.args[0]
+
+    assert f"{ca_bundle}:/etc/sregym/trusted-ca-bundle.pem:ro" in command
+    assert "SSL_CERT_FILE=/etc/sregym/trusted-ca-bundle.pem" in command
+
+
 @pytest.mark.parametrize("model", ["local/gpt-5", "gpt-5"])
 def test_cli_judge_does_not_require_or_inherit_agent_endpoint(docker, monkeypatch, model):
     import main

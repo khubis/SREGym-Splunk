@@ -55,6 +55,10 @@ class AgentLauncher:
         """
         self._agent_kubeconfig_path = kubeconfig_path
 
+    def configure_agent_capabilities(self, reg: AgentRegistration) -> None:
+        """Apply declared agent capabilities before any container invocation."""
+        self._apply_agent_capabilities(reg)
+
     def enable_container_isolation(
         self, force_build: bool = False, *, k8s_proxy_port: int = 16443, image: str | None = None
     ):

@@ -120,6 +120,10 @@ Traceability is a live checklist: each row names the focused test locations that
 
   The unmodified upstream tree still prevents an unqualified repository-wide green command: three import/environment collection failures, four tests failing in untouched application/Kafka/kubectl-tool code, three Ruff findings in untouched files, and broad pre-existing Pyright debt. K2 does not suppress or repair those unrelated failures; the passing full matrix excludes only those named baseline files, and `--import-mode=importlib` avoids the upstream duplicate test-module-name collision.
 
+- [x] **K3. Close credentialed live-runtime contract gaps before case execution** — Add fail-first coverage for Assistant's UUID request-header requirement, Docker Desktop's exact host alias, agent-image packaging of the observability runtime, capability restrictions before preflight, fork-local image selection, Codex subscription policy state, and explicit enterprise CA trust. Keep TLS verification enabled and mount only exact files. Requirements: R4, R7, R8; contracts: `assistant-v3.md`, `observability-provider.md`. Planned commit: `fix(evals): align live assistant v3 runtime contracts`.
+
+  Evidence: focused tests failed independently for every missing behavior before implementation. The live Assistant container preflight reaches the standalone v3 endpoint after rewriting loopback to `host.docker.internal` and sends a deterministic UUID request header. The Codex judge preflight makes a real `gpt-5.6-luna` call with selected subscription auth, signed managed-policy caches, and a read-only macOS CA bundle; TLS verification remains enabled. The authenticated Splunk provider preflight resolves the Logs Observer connection with the same explicit trust bundle. The focused client/driver/service matrix has 290 passing tests; the broader affected matrix has 707 passing tests and restores 100% changed-line coverage. Ruff and Pyright pass for every touched Python file. The first live case remains the next gate.
+
 ### Final requirement-to-test traceability
 
 | Requirement | Final automated evidence |

@@ -33,8 +33,11 @@ Keep credentials in the process environment or a gitignored local `.env`. The ru
 | `SPLUNK_HEC_INDEX` | Optional HEC index; defaults to `main` |
 | `JUDGE_API_BASE` | Judge endpoint when the selected API backend requires one |
 | `JUDGE_API_KEY` | Judge credential when the selected API backend requires one |
+| `SSL_CERT_FILE` | Optional readable CA bundle for Dockerized CLI judges behind enterprise TLS inspection |
 
 Choose one fixed judge model for the campaign and expose its identifier as the non-secret shell variable `JUDGE_MODEL`. Keep this value and `--judge-backend` unchanged across results being compared.
+
+The commands below use `--force-build` so the container includes this checkout's Assistant adapter and observability integration. Docker reuses unchanged build layers after the first build.
 
 ## Preflight
 
@@ -64,7 +67,8 @@ uv run main.py \
   --judge-model "$JUDGE_MODEL" \
   --judge-backend api \
   --observability-provider splunk \
-  --allow-agent-endpoint "$ASSISTANT_V3_URL"
+  --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --force-build
 ```
 
 The other planned acceptance case, `readiness_probe_misconfiguration_social_network`, uses the same command shape and exercises Kubernetes readiness/events more directly. Do not change its prompt or add a service/time hint.
@@ -84,7 +88,8 @@ uv run main.py \
   --judge-model "$JUDGE_MODEL" \
   --judge-backend api \
   --observability-provider splunk \
-  --allow-agent-endpoint "$ASSISTANT_V3_URL"
+  --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --force-build
 ```
 
 Confirm `run_metadata.json` contains `"benchmark_profile": "svelte"` and `"comparable": false`. A successful smoke does not establish leaderboard comparability.
@@ -104,7 +109,8 @@ uv run main.py \
   --judge-model "$JUDGE_MODEL" \
   --judge-backend api \
   --observability-provider splunk \
-  --allow-agent-endpoint "$ASSISTANT_V3_URL"
+  --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --force-build
 ```
 
 The campaign aggregate is `results/<batch>/assistant_v3_ALL_results.csv`. Resume into a new batch with the same model, reasoning, judge, profile, provider, stages, and attempt count:
@@ -122,6 +128,7 @@ uv run main.py \
   --judge-backend api \
   --observability-provider splunk \
   --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --force-build \
   --resume "$RESULTS_CSV"
 ```
 

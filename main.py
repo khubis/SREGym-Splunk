@@ -1152,6 +1152,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
                     image=agent_image,
                 )
             if agent_reg and LAUNCHER._container_runner is not None:
+                LAUNCHER.configure_agent_capabilities(agent_reg)
                 LAUNCHER._container_runner.prepare_agent_tools(agent_reg.install_script, agent_reg.agent_version)
             run_preflight_check(
                 args.agent,

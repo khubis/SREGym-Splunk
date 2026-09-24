@@ -33,6 +33,7 @@ HARDENING_FLAGS = (
     "--security-opt=no-new-privileges",
 )
 AGENT_TOOLS_CONTAINER_PATH = "/opt/agent-tools"
+TRUSTED_CA_BUNDLE_CONTAINER_PATH = "/etc/sregym/trusted-ca-bundle.pem"
 CONTAINER_PATH = f"{AGENT_TOOLS_CONTAINER_PATH}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -123,6 +124,7 @@ class ContainerConfig:
     published_ports: list[str] = field(default_factory=list)
     forward_host_credentials: bool = True
     codex_auth: Literal["copy", "shared", "none"] = "copy"
+    trusted_ca_bundle: Path | None = None
 
 
 class ContainerRunner:
@@ -410,7 +412,7 @@ class ContainerRunner:
         return result
 
     def _mount_codex_credentials(self, args: list[str]) -> None:
-        """Copy auth read-only for agents; share only the auth file for judge refreshes."""
+        """Copy auth read-only for agents; share judge auth and signed policy state."""
         if self.config.codex_auth == "none":
             return
         auth_src = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"
@@ -420,6 +422,11 @@ class ContainerRunner:
 
         if self.config.codex_auth == "shared":
             args.extend(["-v", f"{auth_src.resolve()}:/root/.codex/auth.json:rw"])
+            for name in ("cloud-config-bundle-cache.json", "cloud-requirements-cache.json"):
+                cache_src = auth_src.parent / name
+                if cache_src.is_symlink() or not cache_src.is_file() or not os.access(cache_src, os.R_OK):
+                    continue
+                args.extend(["-v", f"{cache_src.resolve()}:/root/.codex/{name}:ro"])
             return
 
         tmp = tempfile.mkdtemp(prefix="sregym-codex-")
@@ -428,6 +435,14 @@ class ContainerRunner:
 
         args.extend(["-v", f"{auth_dst}:/root/.codex/auth.json:ro"])
         self._credential_tmps.append(tmp)
+
+    def _validated_trusted_ca_bundle(self) -> Path | None:
+        source = self.config.trusted_ca_bundle
+        if source is None or self.config.internet_policy.is_filtered:
+            return None
+        if source.is_symlink() or not source.is_file() or not os.access(source, os.R_OK):
+            raise ValueError("Configured trusted CA bundle must be a readable regular file, not a symlink")
+        return source.resolve()
 
     def _run_uses_aws(self, extra_env: dict[str, str] | None = None) -> bool:
         """Whether this run resolves AWS credentials, and so needs ~/.aws."""
@@ -488,6 +503,10 @@ class ContainerRunner:
             env_vars.setdefault("TYPESAFE_API_KEY", os.environ.get("TYPESAFE_API_KEY", ""))
 
         env_vars["AGENT_INTERNET_ACCESS"] = self.internet_access_mode
+
+        if self._validated_trusted_ca_bundle() is not None:
+            for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
+                env_vars[name] = TRUSTED_CA_BUNDLE_CONTAINER_PATH
 
         # Docker Desktop and filtered containers cannot reach host loopback
         # directly. Rewrite every forwarded provider endpoint that points to a
@@ -573,6 +592,9 @@ class ContainerRunner:
                 logger.debug("Skipping ~/.aws mount: no AWS credentials selected for this run")
 
         self._mount_codex_credentials(args)
+
+        if ca_bundle := self._validated_trusted_ca_bundle():
+            args.extend(["-v", f"{ca_bundle}:{TRUSTED_CA_BUNDLE_CONTAINER_PATH}:ro"])
 
         for port in self.config.published_ports:
             args.extend(["-p", port])

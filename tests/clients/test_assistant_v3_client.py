@@ -99,6 +99,12 @@ def test_config_from_environment_and_url_validation() -> None:
             config(base_url=bad_url)
     assert config(base_url="http://127.0.0.1:8903").base_url == "http://127.0.0.1:8903"
     assert config(base_url="http://localhost:8903").base_url == "http://localhost:8903"
+    assert (
+        config(base_url="http://host.docker.internal:8903").base_url
+        == "http://host.docker.internal:8903"
+    )
+    with pytest.raises(AssistantV3Error, match="HTTPS"):
+        config(base_url="http://host.docker.internal.example.test:8903")
 
 
 @pytest.mark.parametrize(

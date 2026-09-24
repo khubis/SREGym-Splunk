@@ -460,7 +460,7 @@ def _validated_base_url(value: str) -> str:
 
 
 def _is_loopback(hostname: str) -> bool:
-    if hostname.casefold() == "localhost":
+    if hostname.casefold() in {"localhost", "host.docker.internal"}:
         return True
     try:
         return ipaddress.ip_address(hostname).is_loopback
