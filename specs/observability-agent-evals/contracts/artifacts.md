@@ -32,6 +32,7 @@ Contains no headers or credentials:
   "schema": "sregym.assistant_v3.request.v1",
   "problem_id": "anon_<id>",
   "prompt": "<rendered prompt>",
+  "action_instructions": "<opaque execution scope>",
   "prompt_profile_id": "sregym-stratus-diagnosis-v1",
   "prompt_sha256": "<sha256>",
   "reference_sha256": "<sha256>",
@@ -85,7 +86,7 @@ Raw records are not deduplicated. Derived consumers deduplicate only when a stab
 }
 ```
 
-Allowed outcomes are `completed`, `configuration_error`, `authentication_error`, `permission_error`, `transient_exhausted`, `incomplete_stream`, `assistant_error`, `ambiguous_completion`, `capability_policy_violation`, and `infrastructure_invalid`. Only `completed` may have `submitted: true`, and then `submission_count` must equal one.
+Allowed outcomes are `completed`, `configuration_error`, `authentication_error`, `permission_error`, `transient_exhausted`, `incomplete_stream`, `assistant_error`, `ambiguous_completion`, `capability_policy_violation`, `telemetry_scope_violation`, and `infrastructure_invalid`. Only `completed` may have `submitted: true`, and then `submission_count` must equal one.
 
 ## `run_metadata.json`
 

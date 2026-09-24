@@ -58,6 +58,12 @@ For each implementation slice, add and run the focused test first and record the
 
 Coverage is enforced with dev-only `pytest-cov` and `diff-cover`: 100% statement and branch coverage for every new feature module, plus 100% changed-line coverage against `upstream/main`. Every changed branch in legacy integration files must have a focused regression test. Generated/vendored files are excluded; live credentials are never required for unit coverage (R9).
 
+### 7. Add a small fail-closed isolation envelope
+
+Reuse the existing opaque run identity rather than adding a replay or tenancy system. Export it as the Kubernetes cluster, `sregym.run.id`, and Splunk APM deployment environment. Keep the frozen benchmark prompt byte-identical, but pass separate Assistant `action_instructions` containing only the current run identity, namespace, and attempt start time.
+
+After Assistant completes and before `/submit`, scan its recorded tool events for a foreign SRE Gym run identity or an explicitly pre-attempt query window. Reject such attempts as `telemetry_scope_violation`, preserve their artifacts, and exclude them from diagnosis scoring. Then run the first ten entries of `SREGYM_LITE_PROBLEMS` once each, sequentially, using the existing resume and reporting paths (R10).
+
 ## System Boundaries
 
 - `[runner]` SRE Gym CLI, attempt lifecycle, model/judge validation, artifact publication.

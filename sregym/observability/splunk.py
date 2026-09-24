@@ -652,6 +652,8 @@ def _gateway_telemetry_resource_attributes(run_id: str) -> list[dict[str, str]]:
         {"name": "k8s.namespace.name", "value": "${K8S_NAMESPACE}"},
         {"name": "k8s.cluster.name", "value": run_id},
         {"name": "sregym.run.id", "value": run_id},
+        {"name": "deployment.environment", "value": run_id},
+        {"name": "deployment.environment.name", "value": run_id},
     ]
 
 
@@ -722,7 +724,13 @@ class SplunkObservabilityProvider:
         self._upsert_secret()
         runtime_values = {
             "clusterName": context.run_id,
-            "extraAttributes": {"custom": [{"name": "sregym.run.id", "value": context.run_id}]},
+            "extraAttributes": {
+                "custom": [
+                    {"name": "sregym.run.id", "value": context.run_id},
+                    {"name": "deployment.environment", "value": context.run_id},
+                    {"name": "deployment.environment.name", "value": context.run_id},
+                ]
+            },
             "gateway": {
                 "config": {
                     "service": {
@@ -771,7 +779,11 @@ class SplunkObservabilityProvider:
         export = ExternalOtlpExport(
             endpoint=f"{RELEASE_NAME}.{NAMESPACE}.svc.cluster.local:4317",
             run_id=context.run_id,
-            resource_attributes={"sregym.run.id": context.run_id},
+            resource_attributes={
+                "deployment.environment": context.run_id,
+                "deployment.environment.name": context.run_id,
+                "sregym.run.id": context.run_id,
+            },
         )
         self._prepared_export = export
         return export

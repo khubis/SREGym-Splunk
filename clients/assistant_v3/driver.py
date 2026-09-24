@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -34,6 +35,7 @@ TerminalOutcome = Literal[
     "assistant_error",
     "ambiguous_completion",
     "capability_policy_violation",
+    "telemetry_scope_violation",
     "infrastructure_invalid",
 ]
 FailureClassification = Literal[
@@ -45,6 +47,7 @@ FailureClassification = Literal[
     "assistant_error",
     "ambiguous_completion",
     "capability_policy_violation",
+    "telemetry_scope_violation",
     "infrastructure_invalid",
 ]
 FailurePhase = Literal[
@@ -236,6 +239,7 @@ class AssistantRequest:
     prompt: RenderedPrompt
     requested_model: str
     requested_reasoning: str
+    action_instructions: str | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
@@ -247,12 +251,14 @@ class AssistantRequest:
             raise ArtifactError("Assistant request requires a prompt")
         if self.run_id in self.prompt.text:
             raise ArtifactError("Assistant prompt must not contain the run identity")
+        if self.action_instructions is not None and not self.action_instructions.strip():
+            raise ArtifactError("Assistant action instructions must be non-empty")
         rendered_hash = hashlib.sha256(self.prompt.text.encode()).hexdigest()
         if rendered_hash != self.prompt.provenance.rendered_sha256:
             raise ArtifactError("Assistant prompt provenance does not match its content")
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": "sregym.assistant_v3.request.v1",
             "problem_id": self.run_id,
             "prompt": self.prompt.text,
@@ -265,6 +271,9 @@ class AssistantRequest:
             "session_id": None,
             "surface": None,
         }
+        if self.action_instructions is not None:
+            result["action_instructions"] = self.action_instructions
+        return result
 
 
 @dataclass(frozen=True)
@@ -398,7 +407,8 @@ class AssistantRunMetadata:
             "agent_started_at": self.agent_started_at,
             "agent_ended_at": self.agent_ended_at,
             "classification": classification,
-            "included_in_diagnosis_pass_rate": classification != "infrastructure_invalid",
+            "included_in_diagnosis_pass_rate": classification
+            not in {"infrastructure_invalid", "telemetry_scope_violation"},
         }
 
 
@@ -432,7 +442,8 @@ class AssistantFailure:
             "retry_count": self.retry_count,
             "phase": self.phase,
             "cleanup_status": self.cleanup_status,
-            "included_in_diagnosis_pass_rate": self.classification != "infrastructure_invalid",
+            "included_in_diagnosis_pass_rate": self.classification
+            not in {"infrastructure_invalid", "telemetry_scope_violation"},
         }
 
 
@@ -733,6 +744,85 @@ _CLIENT_FAILURES: dict[str, FailureClassification] = {
     "capability_policy_violation": "capability_policy_violation",
 }
 
+_RUN_ID_PATTERN = re.compile(r"anon_[0-9a-f]{32}")
+_ABSOLUTE_START_KEYS = frozenset(
+    {
+        "from",
+        "from_time",
+        "start",
+        "start_time",
+        "start_timestamp",
+        "starttime",
+        "starttimestamp",
+    }
+)
+
+
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _build_action_instructions(run_id: str, namespace: str, attempt_started_at: datetime) -> str:
+    return (
+        "Telemetry scope (routing only): investigate only telemetry whose k8s.cluster.name, "
+        "sregym.run.id, deployment.environment, or deployment.environment.name equals "
+        f"{run_id}. The application namespace is {namespace}. Use telemetry at or after "
+        f"{_format_utc(attempt_started_at)} and ignore telemetry from every other run. If current "
+        "scoped telemetry is unavailable, report that instead of using older data."
+    )
+
+
+def _walk_values(value: Any) -> Iterable[tuple[str | None, Any]]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = str(key).strip().lower().replace("-", "_")
+            yield normalized, item
+            yield from _walk_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _walk_values(item)
+
+
+def _absolute_time(value: Any) -> datetime | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate or ("T" not in candidate and not candidate.endswith("Z")):
+            return None
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(UTC)
+    return None
+
+
+def _scope_violation(
+    events: Iterable[AssistantEvent], *, run_id: str, attempt_started_at: datetime
+) -> str | None:
+    for event in events:
+        serialized = json.dumps(event.data, sort_keys=True, default=str)
+        if any(found != run_id for found in _RUN_ID_PATTERN.findall(serialized)):
+            return "Assistant tool trace referenced telemetry from another SRE Gym run"
+        if event.event != "tool.use":
+            continue
+        for key, value in _walk_values(event.data):
+            if key not in _ABSOLUTE_START_KEYS:
+                continue
+            parsed = _absolute_time(value)
+            if parsed is not None and parsed < attempt_started_at:
+                return "Assistant tool trace queried telemetry before the current attempt"
+    return None
+
 
 def execute_assistant_attempt(
     config: DriverRunConfig,
@@ -746,6 +836,7 @@ def execute_assistant_attempt(
     started_at = datetime.now(UTC)
     started_clock = clock()
     rendered: RenderedPrompt | None = None
+    action_instructions: str | None = None
     events: tuple[AssistantEvent, ...] = ()
     event_spool = config.artifacts_root / "assistant_v3" / "events.partial.jsonl"
     session_id: str | None = None
@@ -754,20 +845,30 @@ def execute_assistant_attempt(
     terminal: AssistantTerminal
     try:
         conductor.require_diagnosis()
-        rendered = render_prompt(conductor.get_prompt_context())
+        prompt_context = conductor.get_prompt_context()
+        rendered = render_prompt(prompt_context)
+        action_instructions = _build_action_instructions(
+            config.run_id,
+            prompt_context["app_namespace"],
+            config.attempt_started_at or started_at,
+        )
         result = assistant.run_session(
             prompt=rendered.text,
             request_id=_assistant_request_id(config.run_id),
+            action_instructions=action_instructions,
             event_sink=lambda item: _append_event_spool(event_spool, item),
         )
         events = result.events
         session_id = result.session_id
         retry_count = result.retry_count
-        try:
-            conductor.submit_diagnosis(result.final_text)
-        except (ConductorError, httpx.HTTPError):
+        scope_failure = _scope_violation(
+            events,
+            run_id=config.run_id,
+            attempt_started_at=config.attempt_started_at or started_at,
+        )
+        if scope_failure is not None:
             terminal = AssistantTerminal(
-                outcome="ambiguous_completion",
+                outcome="telemetry_scope_violation",
                 session_id=session_id,
                 final_text=None,
                 submitted=False,
@@ -776,23 +877,44 @@ def execute_assistant_attempt(
                 resolved_reasoning=assistant.configuration.reasoning,
             )
             failure = AssistantFailure(
-                classification="ambiguous_completion",
-                safe_message="Conductor diagnosis submission could not be confirmed",
+                classification="telemetry_scope_violation",
+                safe_message=scope_failure,
                 last_sequence=events[-1].sequence if events else 0,
                 retry_count=retry_count,
                 phase="assistant_execution",
                 cleanup_status="pending",
             )
         else:
-            terminal = AssistantTerminal(
-                outcome="completed",
-                session_id=session_id,
-                final_text=result.final_text,
-                submitted=True,
-                submission_count=1,
-                resolved_model=assistant.configuration.model,
-                resolved_reasoning=assistant.configuration.reasoning,
-            )
+            try:
+                conductor.submit_diagnosis(result.final_text)
+            except (ConductorError, httpx.HTTPError):
+                terminal = AssistantTerminal(
+                    outcome="ambiguous_completion",
+                    session_id=session_id,
+                    final_text=None,
+                    submitted=False,
+                    submission_count=0,
+                    resolved_model=assistant.configuration.model,
+                    resolved_reasoning=assistant.configuration.reasoning,
+                )
+                failure = AssistantFailure(
+                    classification="ambiguous_completion",
+                    safe_message="Conductor diagnosis submission could not be confirmed",
+                    last_sequence=events[-1].sequence if events else 0,
+                    retry_count=retry_count,
+                    phase="assistant_execution",
+                    cleanup_status="pending",
+                )
+            else:
+                terminal = AssistantTerminal(
+                    outcome="completed",
+                    session_id=session_id,
+                    final_text=result.final_text,
+                    submitted=True,
+                    submission_count=1,
+                    resolved_model=assistant.configuration.model,
+                    resolved_reasoning=assistant.configuration.reasoning,
+                )
     except AssistantV3Error as exc:
         events = exc.events
         retry_count = exc.retry_count
@@ -841,11 +963,18 @@ def execute_assistant_attempt(
         rendered = render_prompt(
             {"app_name": "unavailable", "app_description": "unavailable", "app_namespace": "unavailable"}
         )
+    if action_instructions is None:
+        action_instructions = _build_action_instructions(
+            config.run_id,
+            "unavailable",
+            config.attempt_started_at or started_at,
+        )
     request = AssistantRequest(
         run_id=config.run_id,
         prompt=rendered,
         requested_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
+        action_instructions=action_instructions,
     )
     metadata = AssistantRunMetadata(
         run_id=config.run_id,

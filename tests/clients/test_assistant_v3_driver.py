@@ -456,6 +456,13 @@ def test_agent_duration_must_cover_every_received_event(tmp_path: Path) -> None:
             requested_model="model",
             requested_reasoning="medium",
         ),
+        AssistantRequest(
+            run_id=RUN_ID,
+            prompt=prompt(),
+            requested_model="model",
+            requested_reasoning="medium",
+            action_instructions="   ",
+        ),
     ],
 )
 def test_request_artifact_rejects_invalid_or_unproven_inputs(request_artifact: AssistantRequest) -> None:
@@ -807,6 +814,7 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
             judge_backend="api",
             observability_provider="splunk",
             readiness_report=readiness(),
+            attempt_started_at=STARTED_AT,
         ),
         conductor=conductor,
         assistant=assistant,
@@ -824,6 +832,10 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert session_request["session_id"] is None
     assert session_request["model"] == "gpt-5.6-luna"
     assert session_request["reasoning"] == "medium"
+    assert RUN_ID in session_request["action_instructions"]
+    assert "otel-demo" in session_request["action_instructions"]
+    assert "2026-09-23T12:00:00Z" in session_request["action_instructions"]
+    assert RUN_ID not in session_request["prompt"]
     assert "surface" not in session_request
     assert "oracle" not in session_request["prompt"]
     assert requests[2].headers["X-Request-ID"] == "01234567-89ab-cdef-0123-456789abcdef"
@@ -832,6 +844,107 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
         "stage": "diagnosis",
     }
     assert json.loads((tmp_path / "assistant_v3" / "terminal.json").read_text())["submission_count"] == 1
+    persisted_request = json.loads((tmp_path / "assistant_v3" / "request.json").read_text())
+    assert persisted_request["action_instructions"] == session_request["action_instructions"]
+    assert persisted_request["prompt"] == session_request["prompt"]
+
+
+def test_driver_rejects_foreign_run_telemetry_before_submission(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"stage": "diagnosis"})
+        if request.url.path == "/get_app":
+            return httpx.Response(
+                200,
+                json={
+                    "app_name": "Astronomy Shop",
+                    "namespace": "otel-demo",
+                    "namespaces": ["otel-demo"],
+                    "descriptions": "A microservice application.",
+                },
+            )
+        if request.url.path == "/v2/assistant/sessions":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'event: tool.result\ndata: {"id":"call-1","output":"cluster '
+                    + OTHER_RUN_ID.encode()
+                    + b'"}\n\n'
+                    b'event: message.complete\ndata: {"final_text":"Diagnosis from stale telemetry."}\n\n'
+                ),
+            )
+        if request.url.path == "/submit":
+            raise AssertionError("scope-violating output must never be submitted")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    assistant = AssistantV3Client(
+        AssistantV3Config("https://assistant", "assistant-secret", "sf-secret", "gpt-5.6-luna", "medium"),
+        http_client=httpx.Client(transport=transport),
+        retry_policy=RetryPolicy(max_attempts=1),
+        clock=iter((0.0, 0.01, 0.02)).__next__,
+    )
+    result = execute_assistant_attempt(
+        DriverRunConfig(
+            run_id=RUN_ID,
+            attempt=1,
+            artifacts_root=tmp_path,
+            benchmark_profile="full",
+            comparable=True,
+            judge_model="fixed-judge",
+            judge_backend="api",
+            observability_provider="splunk",
+            readiness_report=readiness(),
+            attempt_started_at=STARTED_AT,
+        ),
+        conductor=ConductorClient("http://conductor", http_client=httpx.Client(transport=transport)),
+        assistant=assistant,
+        clock=iter((100.0, 100.2)).__next__,
+    )
+
+    assert result.classification == "telemetry_scope_violation"
+    assert "/submit" not in [request.url.path for request in requests]
+    failure = json.loads((tmp_path / "failure.json").read_text())
+    assert failure["classification"] == "telemetry_scope_violation"
+    assert failure["included_in_diagnosis_pass_rate"] is False
+
+
+def test_scope_validator_rejects_explicit_pre_attempt_windows_and_allows_current_scope() -> None:
+    current = event(
+        1,
+        1.0,
+        "tool.use",
+        {
+            "input": {
+                "filters": [{"cluster": RUN_ID}],
+                "start_time": "2026-09-23T12:00:00Z",
+            }
+        },
+    )
+    stale_iso = event(
+        2,
+        2.0,
+        "tool.use",
+        {"input": {"window": [{"start-time": "2026-09-23T11:59:59Z"}]}},
+    )
+    stale_epoch_ms = event(
+        3,
+        3.0,
+        "tool.use",
+        {"input": {"start": int((STARTED_AT - timedelta(seconds=1)).timestamp() * 1000)}},
+    )
+
+    assert driver_module._scope_violation((current,), run_id=RUN_ID, attempt_started_at=STARTED_AT) is None
+    assert "before" in (
+        driver_module._scope_violation((stale_iso,), run_id=RUN_ID, attempt_started_at=STARTED_AT) or ""
+    )
+    assert "before" in (
+        driver_module._scope_violation((stale_epoch_ms,), run_id=RUN_ID, attempt_started_at=STARTED_AT) or ""
+    )
 
 
 def test_driver_preserves_invalid_stream_and_never_submits_it(tmp_path: Path) -> None:

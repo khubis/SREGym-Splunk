@@ -323,7 +323,11 @@ def test_request_shape_is_exact_and_does_not_send_surface() -> None:
         return streaming_response(complete_stream())
 
     assistant = client_for(handler)
-    assistant.run_session(prompt="Exact prompt", request_id="anon_run")
+    assistant.run_session(
+        prompt="Exact prompt",
+        request_id="anon_run",
+        action_instructions="Use only the current opaque telemetry scope.",
+    )
 
     request = observed[0]
     assert request.method == "POST"
@@ -335,10 +339,21 @@ def test_request_shape_is_exact_and_does_not_send_surface() -> None:
     assert request.headers["X-Request-ID"] == "anon_run"
     assert json.loads(request.content) == {
         "prompt": "Exact prompt",
+        "action_instructions": "Use only the current opaque telemetry scope.",
         "session_id": None,
         "model": "gpt-5.6-luna",
         "reasoning": "medium",
     }
+
+
+@pytest.mark.parametrize("instructions", ["", "   ", 42])
+def test_action_instructions_must_be_non_empty_text(instructions: object) -> None:
+    with pytest.raises(AssistantV3Error, match="action instructions"):
+        client_for(lambda request: pytest.fail("network must not be called")).run_session(
+            prompt="p",
+            request_id="r",
+            action_instructions=instructions,  # type: ignore[arg-type]
+        )
 
 
 def test_text_is_used_only_when_final_text_is_absent_and_usage_can_be_missing() -> None:

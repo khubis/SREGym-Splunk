@@ -41,13 +41,14 @@ X-Request-ID: <UUID derived deterministically from the anonymous run id>
 ```json
 {
   "prompt": "<exact rendered immutable profile>",
+  "action_instructions": "Use only telemetry for opaque run <run_id>, namespace <namespace>, at or after <attempt_started_at>.",
   "session_id": null,
   "model": "<AGENT_MODEL_ID>",
   "reasoning": "<AGENT_REASONING_EFFORT>"
 }
 ```
 
-`surface` is omitted. Unknown request fields are not added. The request contains no problem ID, fault, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL.
+`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. It contains only the opaque run identity, namespace, attempt start time, and a direction to ignore other runs. The request contains no canonical problem ID, fault, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL.
 
 ## Stream Handling
 
@@ -67,7 +68,7 @@ X-Request-ID: <UUID derived deterministically from the anonymous run id>
 1. Fetch `/get_app` once and use only `app_name`, descriptions, and namespace(s) in prompt rendering.
 2. Confirm `/status` expects the `diagnosis` stage before starting.
 3. Start one fresh Assistant session.
-4. On one valid completion, `POST /submit` exactly once using the current Conductor diagnosis schema and the completed natural-language diagnosis.
+4. On one valid completion, validate the recorded tool events against the execution scope, then `POST /submit` exactly once using the current Conductor diagnosis schema and the completed natural-language diagnosis.
 5. Do not submit on preflight, provider, HTTP, parsing, stream, Assistant, blank-output, or capability-policy failure.
 6. A retry of `/submit` is permitted only if the Conductor contract provides an idempotency/accepted response that proves it cannot duplicate evaluation; otherwise preserve ambiguity and stop.
 
@@ -101,5 +102,6 @@ The immutable v1 substitution IDs cover only direct Kubernetes enumeration, miti
 | `assistant.error` | `assistant_error` | no |
 | empty/conflicting completion | `ambiguous_completion` | no |
 | forbidden Kubernetes tool observed | `capability_policy_violation` | no |
+| foreign run identity or explicitly pre-attempt query observed | `telemetry_scope_violation` | no |
 
 All messages are passed through known-secret redaction and contain status/category, not response headers or bodies that can expose credentials.

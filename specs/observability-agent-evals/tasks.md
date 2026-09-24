@@ -168,6 +168,13 @@ Traceability is a live checklist: each row names the focused test locations that
 
 - [ ] **M. Validate two live Lite cases, then the suite gate** — With user-supplied gitignored credentials, run `edge_request_filter_cpu_saturation` and `readiness_probe_misconfiguration_social_network` using `--stages diagnosis --profile full --agent assistant_v3 --model gpt-5.6-luna --reasoning-effort medium` plus an explicit fixed judge model/backend and Splunk provider. For each, verify four opening/closing signals, zero send/enqueue failures, drained queues, reasonable recorded lag, exact prompt provenance, one Assistant session/submission, unchanged judge behavior, complete artifacts, and no forbidden capability. Run a svelte smoke only as non-comparable. Start the full Lite suite only after both full-profile cases pass; preserve failures rather than editing scenarios or prompts around them.
 
+## [isolation/pilot] Cross-Run Isolation and Ten-Case Pilot
+
+- [x] **N1. Tag the current run for every Splunk signal** — First add focused tests, then export the existing opaque run identity as the Kubernetes cluster, `sregym.run.id`, and deployment environment. Requirement: R10.
+- [x] **N2. Scope Assistant and fail closed** — First add focused tests, then send separate non-diagnostic `action_instructions`; before submission, reject traces containing a foreign run identity or explicit pre-attempt query window as `telemetry_scope_violation`. Preserve artifacts. Requirement: R10; contracts: `assistant-v3.md`, `artifacts.md`.
+- [ ] **N3. Verify one isolated end-to-end case** — Run the existing live case, inspect its prompt, execution scope, tool trace, diagnosis, judge result, and delivery report, and confirm no foreign run was used.
+- [ ] **N4. Run the ten-case pilot** — Run the first ten registered Lite cases once each and sequentially. Resume rather than duplicate after interruption. Report per-case validity, score, duration, tokens, tool calls, and failed tool calls; aggregate scores only across valid attempts.
+
 ## Commit and Upstream Strategy
 
 - Commits A–F contain no `clients.assistant_v3` import and are candidates for an upstream PR in order: coverage foundation, provider lifecycle, capability declarations, OTLP fan-out, secure Splunk export, delivery verification.

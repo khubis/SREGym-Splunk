@@ -213,11 +213,16 @@ class AssistantV3Client:
         *,
         prompt: str,
         request_id: str,
+        action_instructions: str | None = None,
         event_sink: Callable[[AssistantEvent], None] | None = None,
     ) -> AssistantSessionResult:
         """Run one fresh session and return only an unambiguous completion."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise AssistantV3Error("configuration", "Assistant prompt must be a non-empty string")
+        if action_instructions is not None and (
+            not isinstance(action_instructions, str) or not action_instructions.strip()
+        ):
+            raise AssistantV3Error("configuration", "Assistant action instructions must be a non-empty string")
         _validate_request_id(request_id)
         started_at = self._clock()
         events: list[AssistantEvent] = []
@@ -230,16 +235,19 @@ class AssistantV3Client:
 
         for attempt in range(1, self.retry_policy.max_attempts + 1):
             try:
+                request_body: dict[str, Any] = {
+                    "prompt": prompt,
+                    "session_id": None,
+                    "model": self.configuration.model,
+                    "reasoning": self.configuration.reasoning,
+                }
+                if action_instructions is not None:
+                    request_body["action_instructions"] = action_instructions
                 with self._client.stream(
                     "POST",
                     self._session_url,
                     headers=self._headers(request_id, accept="text/event-stream"),
-                    json={
-                        "prompt": prompt,
-                        "session_id": None,
-                        "model": self.configuration.model,
-                        "reasoning": self.configuration.reasoning,
-                    },
+                    json=request_body,
                     timeout=self.retry_policy.request_timeout_seconds,
                 ) as response:
                     if not 200 <= response.status_code < 300:

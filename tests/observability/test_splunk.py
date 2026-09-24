@@ -285,7 +285,11 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     assert first is second
     assert first.run_id == RUN_ID
     assert first.endpoint == f"{RELEASE_NAME}.{NAMESPACE}.svc.cluster.local:4317"
-    assert first.resource_attributes == {"sregym.run.id": RUN_ID}
+    assert first.resource_attributes == {
+        "deployment.environment": RUN_ID,
+        "deployment.environment.name": RUN_ID,
+        "sregym.run.id": RUN_ID,
+    }
     core_api.create_namespace.assert_called_once()
     core_api.create_namespaced_secret.assert_called_once()
     secret_call = core_api.create_namespaced_secret.call_args
@@ -308,7 +312,13 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     runtime_values = yaml.safe_load(stdin)
     assert runtime_values == {
         "clusterName": RUN_ID,
-        "extraAttributes": {"custom": [{"name": "sregym.run.id", "value": RUN_ID}]},
+        "extraAttributes": {
+            "custom": [
+                {"name": "sregym.run.id", "value": RUN_ID},
+                {"name": "deployment.environment", "value": RUN_ID},
+                {"name": "deployment.environment.name", "value": RUN_ID},
+            ]
+        },
         "gateway": {
             "config": {
                 "service": {
@@ -323,6 +333,8 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
                                 {"name": "k8s.namespace.name", "value": "${K8S_NAMESPACE}"},
                                 {"name": "k8s.cluster.name", "value": RUN_ID},
                                 {"name": "sregym.run.id", "value": RUN_ID},
+                                {"name": "deployment.environment", "value": RUN_ID},
+                                {"name": "deployment.environment.name", "value": RUN_ID},
                             ]
                         }
                     }
