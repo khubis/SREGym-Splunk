@@ -124,6 +124,10 @@ Traceability is a live checklist: each row names the focused test locations that
 
   Evidence: focused tests failed independently for every missing behavior before implementation. The live Assistant container preflight reaches the standalone v3 endpoint after rewriting loopback to `host.docker.internal` and sends a deterministic UUID request header. The Codex judge preflight makes a real `gpt-5.6-luna` call with selected subscription auth, signed managed-policy caches, and a read-only macOS CA bundle; TLS verification remains enabled. The authenticated Splunk provider preflight resolves the Logs Observer connection with the same explicit trust bundle. The focused client/driver/service matrix has 290 passing tests; the broader affected matrix has 707 passing tests and restores 100% changed-line coverage. Ruff and Pyright pass for every touched Python file. The first live case remains the next gate.
 
+- [x] **K4. Prevent observability collectors from competing for application host ports** — Keep the Splunk node agent for container log collection and the cluster receiver for Kubernetes events, but disable the node agent's OTLP, Jaeger, and Zipkin host ports so benchmark applications can schedule their own OTel agents. Requirements: R3, R7; contract: `observability-provider.md`. Planned commit: `fix(observability): avoid collector host-port collisions`.
+
+  Evidence: the first cached full-profile deployment showed all three Astronomy Shop OTel agent pods unschedulable because the Splunk DaemonSet owned host port 4317. The fail-first values test rejected the original chart overrides. The corrected chart renders the Splunk agent and gateway with zero `hostPort` entries, while leaving file-log and Kubernetes-event collection enabled. All 141 observability tests pass and Ruff is clean.
+
 ### Final requirement-to-test traceability
 
 | Requirement | Final automated evidence |

@@ -30,6 +30,14 @@ splunkObservability:
 
 agent:
   enabled: true
+  # The benchmark applications deploy their own node-local OTel agents on
+  # these host ports. This agent only needs file-log collection.
+  ports:
+    otlp: null
+    otlp-http: null
+    zipkin: null
+    jaeger-thrift: null
+    jaeger-grpc: null
   resources:
     requests:
       cpu: 50m

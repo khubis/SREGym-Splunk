@@ -225,6 +225,15 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
     assert values["gateway"]["enabled"] is True
     assert values["gateway"]["tokenPassthrough"] is False
     assert values["gateway"]["replicaCount"] == 1
+    assert values["agent"]["enabled"] is True
+    assert values["clusterReceiver"]["eventsEnabled"] is True
+    assert values["agent"]["ports"] == {
+        "otlp": None,
+        "otlp-http": None,
+        "zipkin": None,
+        "jaeger-thrift": None,
+        "jaeger-grpc": None,
+    }
     for workload in ("agent", "clusterReceiver", "gateway"):
         resources = values[workload]["resources"]
         assert set(resources) == {"requests", "limits"}
