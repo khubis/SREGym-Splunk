@@ -17,7 +17,7 @@ The Splunk provider installs the official Splunk OpenTelemetry Collector Helm ch
 The collector chart supplies Kubernetes metrics, container logs, and Kubernetes events. A generic optional fan-out in SRE Gym's existing central OTel collector preserves Jaeger and Prometheus while additionally:
 
 - exporting the existing application traces over OTLP to the Splunk gateway; and
-- scraping SRE Gym's central Prometheus federation endpoint and exporting application/span/Kubernetes metrics over OTLP.
+- exporting application traces over OTLP. The v1 fan-out deliberately does not federate every central Prometheus series; the provider collector supplies Kubernetes metrics without an unbounded duplicate metrics stream.
 
 The chart is configured from committed non-secret values plus a pre-created Kubernetes Secret. Tokens are passed through the Kubernetes API, never Helm command arguments, rendered values, prompts, or logs. `SF_TOKEN` remains the user/API query token while `SPLUNK_O11Y_INGEST_TOKEN` is the collector's least-privilege org ingest token. `SPLUNK_HOST` and `SPLUNK_HEC_PORT` form the HTTPS HEC endpoint; `SPLUNK_HEC_INDEX` defaults to `main`, must be allowed by the HEC token, and is recorded. TLS verification is on and has no v1 disable flag (R3, R7).
 
@@ -105,7 +105,7 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 - `agents.yaml` `[runner]` — register `assistant_v3` only.
 - `sregym/agent_registry.py`, `sregym/agent_launcher.py` `[runner]` — backward-compatible direct-Kubernetes/MCP capability flags and enforcement.
 - `sregym/conductor/conductor.py` `[runner/infra]` — invoke provider preparation at the safe pre-deploy seam.
-- `sregym/observer/otel_collector/otel_collector.py` and `otel-collector.yaml` `[infra/reusable]` — optional OTLP trace/metric fan-out; disabled output remains unchanged.
+- `sregym/observer/otel_collector/otel_collector.py` and `otel-collector.yaml` `[infra/reusable]` — optional OTLP trace fan-out; disabled output remains unchanged.
 - `sregym/run_artifacts.py` `[runner]` — validated preallocated opaque identity.
 - `sregym/service/container_runner.py` `[runner]` — enforce per-agent Kubernetes/MCP exposure and allowlist only required Assistant variables; continue stripping judge credentials.
 - `atif_converter/adapters/__init__.py`, `atif_converter/converter.py`, `sregym/traces/convert.py` `[traces]` — register Assistant detection/dispatch.

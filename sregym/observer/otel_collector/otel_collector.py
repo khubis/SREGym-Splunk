@@ -52,27 +52,6 @@ class OtelCollector:
             pipeline["processors"] = [*pipeline.get("processors", []), "resource/external"]
             pipeline["exporters"] = [*pipeline["exporters"], "otlp/external"]
 
-        collector_config["receivers"]["prometheus/external"] = {
-            "config": {
-                "scrape_configs": [
-                    {
-                        "job_name": "sregym-federation",
-                        "honor_labels": True,
-                        "metrics_path": "/federate",
-                        "params": {"match[]": ['{__name__=~".+"}']},
-                        "static_configs": [
-                            {"targets": ["prometheus-server.observe.svc.cluster.local:80"]},
-                        ],
-                    }
-                ]
-            }
-        }
-        collector_config["service"]["pipelines"]["metrics/external"] = {
-            "receivers": ["prometheus/external"],
-            "processors": ["resource/external"],
-            "exporters": ["otlp/external"],
-        }
-
         config_map["data"]["config.yaml"] = yaml.safe_dump(collector_config, sort_keys=False)
         return yaml.safe_dump_all(documents, explicit_start=True, sort_keys=False)
 

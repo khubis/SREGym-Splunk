@@ -118,7 +118,7 @@ The provider CLI selection is `--observability-provider none|splunk`, default `n
 
 The Splunk implementation must observe, not merely send, all four signals using `run_id`, `ApplicationScope.namespaces`, and `attempt_started_at`:
 
-- `metrics`: at least one federated application/span or Kubernetes metric is returned.
+- `metrics`: at least one run-scoped Kubernetes metric from the provider collector is returned.
 - `traces`: at least one application span/trace is returned.
 - `logs`: at least one container-log event is returned through the selected Logs Observer connection.
 - `kubernetes_events`: at least one Kubernetes event record is returned through the selected Logs Observer connection.

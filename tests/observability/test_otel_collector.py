@@ -37,7 +37,7 @@ def test_disabled_rendering_returns_the_original_manifest_and_pipelines():
     assert collector_config(rendered)["service"]["pipelines"] == collector_config(original)["service"]["pipelines"]
 
 
-def test_external_rendering_adds_one_exporter_resource_context_and_fanout(monkeypatch):
+def test_external_rendering_fans_out_traces_without_federating_all_metrics(monkeypatch):
     monkeypatch.setenv("SPLUNK_HEC_TOKEN", "must-not-appear")
     collector = OtelCollector()
     original = collector_config(collector.render_manifest(None))
@@ -63,22 +63,8 @@ def test_external_rendering_adds_one_exporter_resource_context_and_fanout(monkey
         ]
         assert config["service"]["pipelines"][pipeline_name]["processors"] == ["resource/external"]
 
-    receiver = config["receivers"]["prometheus/external"]
-    scrape = receiver["config"]["scrape_configs"]
-    assert scrape == [
-        {
-            "job_name": "sregym-federation",
-            "honor_labels": True,
-            "metrics_path": "/federate",
-            "params": {"match[]": ['{__name__=~".+"}']},
-            "static_configs": [{"targets": ["prometheus-server.observe.svc.cluster.local:80"]}],
-        }
-    ]
-    assert config["service"]["pipelines"]["metrics/external"] == {
-        "receivers": ["prometheus/external"],
-        "processors": ["resource/external"],
-        "exporters": ["otlp/external"],
-    }
+    assert "prometheus/external" not in config["receivers"]
+    assert "metrics/external" not in config["service"]["pipelines"]
     assert "must-not-appear" not in manifest
 
 
