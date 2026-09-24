@@ -641,6 +641,20 @@ class SplunkConfig:
         }
 
 
+def _gateway_telemetry_resource_attributes(run_id: str) -> list[dict[str, str]]:
+    """Preserve chart defaults and scope gateway exporter counters to one attempt."""
+    return [
+        {"name": "service.name", "value": "otel-collector"},
+        {"name": "otelcol.service.mode", "value": "gateway"},
+        {"name": "k8s.node.name", "value": "${K8S_NODE_NAME}"},
+        {"name": "k8s.pod.name", "value": "${K8S_POD_NAME}"},
+        {"name": "k8s.pod.uid", "value": "${K8S_POD_UID}"},
+        {"name": "k8s.namespace.name", "value": "${K8S_NAMESPACE}"},
+        {"name": "k8s.cluster.name", "value": run_id},
+        {"name": "sregym.run.id", "value": run_id},
+    ]
+
+
 @dataclass
 class _AttemptReliabilityState:
     opening: ReadinessReport
@@ -709,6 +723,15 @@ class SplunkObservabilityProvider:
         runtime_values = {
             "clusterName": context.run_id,
             "extraAttributes": {"custom": [{"name": "sregym.run.id", "value": context.run_id}]},
+            "gateway": {
+                "config": {
+                    "service": {
+                        "telemetry": {
+                            "resource": {"attributes": _gateway_telemetry_resource_attributes(context.run_id)}
+                        }
+                    }
+                }
+            },
             "splunkObservability": {"realm": self.configuration.realm},
             "splunkPlatform": {
                 "endpoint": self.configuration.hec_endpoint,

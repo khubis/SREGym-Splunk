@@ -309,6 +309,26 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     assert runtime_values == {
         "clusterName": RUN_ID,
         "extraAttributes": {"custom": [{"name": "sregym.run.id", "value": RUN_ID}]},
+        "gateway": {
+            "config": {
+                "service": {
+                    "telemetry": {
+                        "resource": {
+                            "attributes": [
+                                {"name": "service.name", "value": "otel-collector"},
+                                {"name": "otelcol.service.mode", "value": "gateway"},
+                                {"name": "k8s.node.name", "value": "${K8S_NODE_NAME}"},
+                                {"name": "k8s.pod.name", "value": "${K8S_POD_NAME}"},
+                                {"name": "k8s.pod.uid", "value": "${K8S_POD_UID}"},
+                                {"name": "k8s.namespace.name", "value": "${K8S_NAMESPACE}"},
+                                {"name": "k8s.cluster.name", "value": RUN_ID},
+                                {"name": "sregym.run.id", "value": RUN_ID},
+                            ]
+                        }
+                    }
+                }
+            }
+        },
         "splunkObservability": {"realm": "us0"},
         "splunkPlatform": {
             "endpoint": "https://http-inputs.example.splunkcloud.com:8088/services/collector/event",
