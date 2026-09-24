@@ -309,8 +309,9 @@ class SplunkHttpBackend:
     ) -> int:
         namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
         kind = "k8s.container.name=*" if signal == "logs" else "k8s.event.reason=*"
+        search_index = self.configuration.hec_index or "*"
         query = (
-            f'search index="{self.configuration.hec_index}" k8s.cluster.name="{context.run_id}" '
+            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
             f"({namespaces}) {kind} | head 1"
         )
         job_key = (context.run_id, signal)
@@ -587,7 +588,7 @@ class SplunkConfig:
     hec_host: str
     hec_port: int
     hec_token: str = field(repr=False)
-    hec_index: str = "main"
+    hec_index: str | None = None
     logs_connection_id: str | None = None
 
     @classmethod
@@ -600,7 +601,7 @@ class SplunkConfig:
         host = source["SPLUNK_HOST"].strip()
         realm = source["SFX_REALM"].strip()
         port_text = source["SPLUNK_HEC_PORT"].strip()
-        index = source.get("SPLUNK_HEC_INDEX", "main").strip()
+        index = source.get("SPLUNK_HEC_INDEX", "").strip() or None
         logs_connection_id = source.get("SPLUNK_LOGS_CONNECTION_ID", "").strip() or None
         if _HOST_PATTERN.fullmatch(host) is None:
             raise ProviderError("configuration", "SPLUNK_HOST must be a hostname without a scheme, port, or path")
@@ -611,7 +612,7 @@ class SplunkConfig:
         port = int(port_text)
         if not 1 <= port <= 65535:
             raise ProviderError("configuration", "SPLUNK_HEC_PORT must be between 1 and 65535")
-        if _INDEX_PATTERN.fullmatch(index) is None:
+        if index is not None and _INDEX_PATTERN.fullmatch(index) is None:
             raise ProviderError("configuration", "SPLUNK_HEC_INDEX has an invalid format")
         if logs_connection_id is not None and _CONNECTION_ID_PATTERN.fullmatch(logs_connection_id) is None:
             raise ProviderError("configuration", "SPLUNK_LOGS_CONNECTION_ID has an invalid format")
@@ -635,7 +636,7 @@ class SplunkConfig:
         """Return the non-secret destination fields permitted in run evidence."""
         return {
             "hec_host": self.hec_host,
-            "hec_index": self.hec_index,
+            "hec_index": self.hec_index or "*",
             "hec_port": self.hec_port,
             "realm": self.realm,
         }
@@ -743,10 +744,11 @@ class SplunkObservabilityProvider:
             "splunkObservability": {"realm": self.configuration.realm},
             "splunkPlatform": {
                 "endpoint": self.configuration.hec_endpoint,
-                "index": self.configuration.hec_index,
                 "insecureSkipVerify": False,
             },
         }
+        if self.configuration.hec_index is not None:
+            runtime_values["splunkPlatform"]["index"] = self.configuration.hec_index
         command = [
             "helm",
             "upgrade",
@@ -974,7 +976,7 @@ class SplunkObservabilityProvider:
                         evidence.update(
                             {
                                 "connection_id": connection_id,
-                                "index": self.configuration.hec_index,
+                                "index": self.configuration.hec_index or "*",
                             }
                         )
                     readiness[signal] = SignalReadiness(
@@ -997,7 +999,7 @@ class SplunkObservabilityProvider:
                         failure_evidence.update(
                             {
                                 "connection_id": connection_id,
-                                "index": self.configuration.hec_index,
+                                "index": self.configuration.hec_index or "*",
                             }
                         )
                     readiness[signal] = SignalReadiness(

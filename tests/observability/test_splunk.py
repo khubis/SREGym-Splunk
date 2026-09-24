@@ -201,8 +201,8 @@ def test_config_builds_https_hec_endpoint_and_safe_metadata():
     assert HEC_TOKEN not in encoded
 
 
-def test_config_defaults_logs_index_to_main():
-    assert SplunkConfig.from_env(valid_environment()).hec_index == "main"
+def test_config_uses_the_hec_token_default_index_when_unset():
+    assert SplunkConfig.from_env(valid_environment()).hec_index is None
 
 
 def test_config_accepts_an_explicit_logs_connection_id():
@@ -344,7 +344,6 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
         "splunkObservability": {"realm": "us0"},
         "splunkPlatform": {
             "endpoint": "https://http-inputs.example.splunkcloud.com:8088/services/collector/event",
-            "index": "main",
             "insecureSkipVerify": False,
         },
     }
@@ -888,6 +887,7 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
         payload for operation, payload, _ in requests if operation == "createSearchJob" and payload is not None
     ]
     log_queries = [payload["variables"]["query"] for payload in log_payloads]
+    assert all('index="*"' in query for query in log_queries)
     assert all(f'k8s.cluster.name="{RUN_ID}"' in query and "social-network" in query for query in log_queries)
     assert "k8s.container.name=*" in log_queries[0]
     assert "k8s.event.reason=*" in log_queries[1]
@@ -960,7 +960,7 @@ def test_wait_until_queryable_records_all_signals_scope_and_first_visible_lag():
     for signal in report.signals:
         if signal.signal in ("logs", "kubernetes_events"):
             assert signal.evidence["connection_id"] == "connection-default"
-            assert signal.evidence["index"] == "main"
+            assert signal.evidence["index"] == "*"
         else:
             assert "connection_id" not in signal.evidence
     assert all(call[1:] == (RUN_ID, ("social-network",), "connection-default") for call in backend.query_calls)
@@ -1035,7 +1035,7 @@ def test_readiness_failure_evidence_identifies_the_safe_logs_destination():
     assert logs.evidence == {
         "status_class": "5xx",
         "connection_id": "connection-default",
-        "index": "main",
+        "index": "*",
     }
 
 
