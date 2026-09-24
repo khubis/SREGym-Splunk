@@ -3,15 +3,14 @@ import json
 import runpy
 import sys
 import tempfile
-
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from sregym.observability.base import AttemptContext, ProviderError
+from sregym.observability.base import AttemptContext, ProviderError, ReadinessReport, SignalReadiness
 from sregym.run_artifacts import RunArtifacts
 
 
@@ -191,13 +190,27 @@ def test_driver_config_records_opaque_identity_and_comparability_without_secrets
         agent="assistant_v3",
         attempt=2,
     )
+    started_at = datetime(2026, 9, 24, 12, tzinfo=UTC)
     context = AttemptContext(
         run_id=run.artifact_id,
         profile="svelte",
         comparable=False,
-        attempt_started_at=datetime.now(UTC),
+        attempt_started_at=started_at,
     )
-    conductor = SimpleNamespace(observability_readiness=None, _observability_context=context)
+    readiness = ReadinessReport(
+        run_id=run.artifact_id,
+        ready=True,
+        signals=tuple(
+            SignalReadiness(
+                signal=signal,
+                ready=True,
+                checked_at=started_at + timedelta(seconds=offset),
+                evidence={"count": 1},
+            )
+            for offset, signal in enumerate(("metrics", "traces", "logs", "kubernetes_events"), start=1)
+        ),
+    )
+    conductor = SimpleNamespace(observability_readiness=readiness, _observability_context=context)
     provider = SimpleNamespace(
         name="splunk",
         configuration=SimpleNamespace(hec_index="main", hec_token="hec-secret"),
@@ -212,6 +225,8 @@ def test_driver_config_records_opaque_identity_and_comparability_without_secrets
     assert payload["benchmark_profile"] == "svelte"
     assert payload["comparable"] is False
     assert payload["judge_model"] == "fixed-judge"
+    assert payload["attempt_started_at"] == "2026-09-24T12:00:00Z"
+    assert payload["telemetry_window_ended_at"] == "2026-09-24T12:00:04Z"
     assert "real-problem-id" not in json.dumps(payload)
     assert "hec-secret" not in json.dumps(payload)
 

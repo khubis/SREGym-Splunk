@@ -299,6 +299,11 @@ def _write_assistant_driver_config(
             if driver_config.attempt_started_at is not None
             else None
         ),
+        "telemetry_window_ended_at": (
+            driver_config.telemetry_window_ended_at.isoformat().replace("+00:00", "Z")
+            if driver_config.telemetry_window_ended_at is not None
+            else None
+        ),
     }
     path = run.active_dir / "assistant_v3_driver_config.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -313,6 +318,8 @@ def _assistant_driver_config(
 ) -> DriverRunConfig:
     configuration = getattr(provider, "configuration", None)
     attempt_context = getattr(conductor, "_observability_context", None)
+    readiness = conductor.observability_readiness
+    window_ended_at = max((signal.checked_at for signal in readiness.signals), default=None) if readiness else None
     return DriverRunConfig(
         run_id=run.artifact_id,
         attempt=run.attempt,
@@ -322,12 +329,13 @@ def _assistant_driver_config(
         judge_model=os.environ["JUDGE_MODEL_ID"],
         judge_backend=judge_backend,
         observability_provider=provider.name,
-        readiness_report=conductor.observability_readiness,
+        readiness_report=readiness,
         agent_version=agent_version,
         observability_chart_version="0.160.0" if provider.name == "splunk" else None,
         hec_index=getattr(configuration, "hec_index", None),
         logs_connection_id=getattr(provider, "_connection_id", None),
         attempt_started_at=getattr(attempt_context, "attempt_started_at", None),
+        telemetry_window_ended_at=window_ended_at,
     )
 
 

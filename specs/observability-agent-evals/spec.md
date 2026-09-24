@@ -29,7 +29,7 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - Prompt adaptation MUST be subtractive and minimal: text unrelated to an unavailable capability MUST remain unchanged in wording and order, apart from runtime field substitution.
 - Every capability-dependent difference from the upstream reference MUST be documented and mechanically reviewable; such differences MUST NOT add diagnostic information or make the task easier.
 - The model-visible benchmark prompt MUST NOT add a faulty service name, symptom hint, investigation method, likely fault type, or rubric-derived guidance that is absent from the selected upstream profile.
-- Provider-specific routing and run-isolation information MUST NOT change the benchmark prompt. A separate trusted execution instruction MAY provide only the opaque run identity, namespace, and attempt start time needed to select the current telemetry.
+- Provider-specific routing and run-isolation information MUST NOT change the benchmark prompt. A separate trusted execution instruction MAY provide only the inclusive UTC start and end of the incident telemetry window.
 - Every attempt MUST preserve the exact rendered prompt and enough provenance to identify the prompt profile and detect later prompt drift.
 - A prompt change, including a change to capability substitutions, MUST create a new identifiable profile rather than silently changing the meaning of existing results.
 
@@ -96,8 +96,9 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 ### R10. Cross-run isolation and ten-case pilot
 
 - Every exported signal MUST carry the same opaque run identity as `k8s.cluster.name`, `sregym.run.id`, and the deployment-environment resource attribute used by Splunk APM.
-- Assistant v3 MUST receive a separate execution instruction to use only the current run identity, namespace, and attempt time range. It MUST contain no scenario or diagnosis hint and MUST leave the frozen benchmark prompt unchanged.
-- Before submission, the driver MUST fail closed with `telemetry_scope_violation` when the recorded tool trace contains a different SRE Gym run identity or an explicitly pre-attempt query window. The trace MUST remain available and the attempt MUST be excluded from diagnosis scoring.
+- The opaque identity is harness-only delivery metadata. It MUST NOT be included in Assistant instructions, added as an Assistant tool constraint, or required in Assistant tool queries.
+- Assistant v3 MUST receive a separate execution instruction containing only the inclusive UTC start and end of the incident telemetry window. It MUST contain no run identity, namespace, scenario, or diagnosis hint and MUST leave the frozen benchmark prompt unchanged.
+- Before submission, the driver MUST fail closed with `telemetry_scope_violation` when a recorded tool call contains an explicit absolute timestamp outside the supplied window. The trace MUST remain available and the attempt MUST be excluded from diagnosis scoring. The harness MUST NOT reject an attempt merely because a foreign run identity appears in tool output.
 - The first pilot MUST run the first ten cases in `SREGYM_LITE_PROBLEMS`, in their registered order, once each and sequentially. Reports MUST show every attempt and aggregate diagnosis scores only across valid attempts.
 
 ## Non-Goals
@@ -134,7 +135,7 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - [ ] Given a resource-reduced smoke run, when results are displayed or inspected, then they are explicitly labeled non-comparable and cannot be mistaken for a normal comparison run.
 - [ ] Given one successful and one invalid attempt, when a reviewer performs the documented spot check, then the reviewer can identify the exact prompt, submitted answer, judge result, tool totals, failure classification, and source trace without reading implementation code.
 - [ ] Given the proposed change set, when traceability is reviewed, then every production change maps to an approved requirement and test, and no implementation outside the approved scope is present.
-- [ ] Given current and older SRE Gym telemetry in one Splunk org, when an attempt runs, then all exported signals and Assistant execution instructions identify only the current opaque run, and a trace that uses another run is preserved but rejected before grading.
+- [ ] Given non-overlapping current and older SRE Gym telemetry in one Splunk org, when an attempt runs, then the Assistant receives only the current incident's start and end timestamps, and an explicit query outside that window is preserved but rejected before grading.
 - [ ] Given the ten-case pilot command, when it completes or is resumed, then it contains exactly the first ten registered Lite cases, one sequential attempt per case, and a report that separates valid scores from infrastructure or scope failures.
 
 ## Assumptions

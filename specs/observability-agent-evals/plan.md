@@ -60,9 +60,9 @@ Coverage is enforced with dev-only `pytest-cov` and `diff-cover`: 100% statement
 
 ### 7. Add a small fail-closed isolation envelope
 
-Reuse the existing opaque run identity rather than adding a replay or tenancy system. Export it as the Kubernetes cluster, `sregym.run.id`, and Splunk APM deployment environment. Keep the frozen benchmark prompt byte-identical, but pass separate Assistant `action_instructions` containing only the current run identity, namespace, and attempt start time.
+Reuse the existing opaque run identity only for harness-level delivery verification rather than adding a replay or tenancy system. Do not expose it in Assistant instructions or modify Assistant tools to require it. Keep the frozen benchmark prompt byte-identical, but pass separate Assistant `action_instructions` containing only the inclusive UTC start and end of the incident telemetry window.
 
-After Assistant completes and before `/submit`, scan its recorded tool events for a foreign SRE Gym run identity or an explicitly pre-attempt query window. Reject such attempts as `telemetry_scope_violation`, preserve their artifacts, and exclude them from diagnosis scoring. Then run the first ten entries of `SREGYM_LITE_PROBLEMS` once each, sequentially, using the existing resume and reporting paths (R10).
+After Assistant completes and before `/submit`, scan recorded tool calls for explicit absolute timestamps outside that window. Reject such attempts as `telemetry_scope_violation`, preserve their artifacts, and exclude them from diagnosis scoring. Do not reject foreign run identifiers in tool output. Then run the first ten entries of `SREGYM_LITE_PROBLEMS` once each, sequentially, using the existing resume and reporting paths (R10).
 
 ## System Boundaries
 

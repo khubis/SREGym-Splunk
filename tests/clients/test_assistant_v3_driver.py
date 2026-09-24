@@ -48,6 +48,7 @@ RUN_ID = "anon_0123456789abcdef0123456789abcdef"
 OTHER_RUN_ID = "anon_ffffffffffffffffffffffffffffffff"
 PROMPT = "Investigate the application and diagnose the root cause."
 STARTED_AT = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+WINDOW_ENDED_AT = STARTED_AT + timedelta(minutes=5)
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "assistant_v3" / "golden_infrastructure_invalid"
 WORKFLOW_DOC = Path(__file__).parents[2] / "docs" / "assistant-v3-evaluations.md"
 SECRET = "fixture-secret-that-must-never-be-written"
@@ -815,6 +816,7 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
             observability_provider="splunk",
             readiness_report=readiness(),
             attempt_started_at=STARTED_AT,
+            telemetry_window_ended_at=WINDOW_ENDED_AT,
         ),
         conductor=conductor,
         assistant=assistant,
@@ -832,9 +834,10 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert session_request["session_id"] is None
     assert session_request["model"] == "gpt-5.6-luna"
     assert session_request["reasoning"] == "medium"
-    assert RUN_ID in session_request["action_instructions"]
-    assert "otel-demo" in session_request["action_instructions"]
+    assert RUN_ID not in session_request["action_instructions"]
+    assert "otel-demo" not in session_request["action_instructions"]
     assert "2026-09-23T12:00:00Z" in session_request["action_instructions"]
+    assert "2026-09-23T12:05:00Z" in session_request["action_instructions"]
     assert RUN_ID not in session_request["prompt"]
     assert "surface" not in session_request
     assert "oracle" not in session_request["prompt"]
@@ -849,7 +852,7 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert persisted_request["prompt"] == session_request["prompt"]
 
 
-def test_driver_rejects_foreign_run_telemetry_before_submission(tmp_path: Path) -> None:
+def test_driver_rejects_an_explicit_out_of_window_query_before_submission(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -871,9 +874,7 @@ def test_driver_rejects_foreign_run_telemetry_before_submission(tmp_path: Path) 
                 200,
                 headers={"content-type": "text/event-stream"},
                 content=(
-                    b'event: tool.result\ndata: {"id":"call-1","output":"cluster '
-                    + OTHER_RUN_ID.encode()
-                    + b'"}\n\n'
+                    b'event: tool.use\ndata: {"id":"call-1","input":{"start_time":"2026-09-23T11:59:59Z"}}\n\n'
                     b'event: message.complete\ndata: {"final_text":"Diagnosis from stale telemetry."}\n\n'
                 ),
             )
@@ -900,6 +901,7 @@ def test_driver_rejects_foreign_run_telemetry_before_submission(tmp_path: Path) 
             observability_provider="splunk",
             readiness_report=readiness(),
             attempt_started_at=STARTED_AT,
+            telemetry_window_ended_at=WINDOW_ENDED_AT,
         ),
         conductor=ConductorClient("http://conductor", http_client=httpx.Client(transport=transport)),
         assistant=assistant,
@@ -937,13 +939,34 @@ def test_scope_validator_rejects_explicit_pre_attempt_windows_and_allows_current
         "tool.use",
         {"input": {"start": int((STARTED_AT - timedelta(seconds=1)).timestamp() * 1000)}},
     )
+    late_end = event(
+        4,
+        4.0,
+        "tool.use",
+        {"input": {"end_time": "2026-09-23T12:05:01Z"}},
+    )
+    foreign_run = event(5, 5.0, "tool.result", {"output": f"cluster {OTHER_RUN_ID}"})
 
-    assert driver_module._scope_violation((current,), run_id=RUN_ID, attempt_started_at=STARTED_AT) is None
+    assert driver_module._scope_violation(
+        (current, foreign_run), window_started_at=STARTED_AT, window_ended_at=WINDOW_ENDED_AT
+    ) is None
     assert "before" in (
-        driver_module._scope_violation((stale_iso,), run_id=RUN_ID, attempt_started_at=STARTED_AT) or ""
+        driver_module._scope_violation(
+            (stale_iso,), window_started_at=STARTED_AT, window_ended_at=WINDOW_ENDED_AT
+        )
+        or ""
     )
     assert "before" in (
-        driver_module._scope_violation((stale_epoch_ms,), run_id=RUN_ID, attempt_started_at=STARTED_AT) or ""
+        driver_module._scope_violation(
+            (stale_epoch_ms,), window_started_at=STARTED_AT, window_ended_at=WINDOW_ENDED_AT
+        )
+        or ""
+    )
+    assert "after" in (
+        driver_module._scope_violation(
+            (late_end,), window_started_at=STARTED_AT, window_ended_at=WINDOW_ENDED_AT
+        )
+        or ""
     )
 
 
@@ -1077,6 +1100,7 @@ def test_driver_config_file_round_trip_preserves_readiness_and_attempt_start(tmp
         "observability_provider": "splunk",
         "readiness_report": serialize_provider_artifact(readiness()),
         "attempt_started_at": "2026-09-23T12:00:00Z",
+        "telemetry_window_ended_at": "2026-09-23T12:05:00Z",
     }
     path = tmp_path / "assistant_v3_driver_config.json"
     path.write_text(json.dumps(payload))
@@ -1086,6 +1110,7 @@ def test_driver_config_file_round_trip_preserves_readiness_and_attempt_start(tmp
     assert config.artifacts_root == tmp_path
     assert config.readiness_report == readiness()
     assert config.attempt_started_at == STARTED_AT
+    assert config.telemetry_window_ended_at == WINDOW_ENDED_AT
 
 
 @pytest.mark.parametrize(
@@ -1148,6 +1173,11 @@ def test_driver_config_file_rejects_missing_file(tmp_path: Path) -> None:
         ({"judge_model": ""}, "judge"),
         ({"readiness_report": readiness(run_id=OTHER_RUN_ID)}, "identities"),
         ({"attempt_started_at": datetime(2026, 9, 23, 12, 0)}, "UTC"),
+        ({"telemetry_window_ended_at": datetime(2026, 9, 23, 12, 5)}, "UTC"),
+        (
+            {"attempt_started_at": STARTED_AT, "telemetry_window_ended_at": STARTED_AT - timedelta(seconds=1)},
+            "window",
+        ),
     ],
 )
 def test_driver_config_validation_rejects_inaccurate_labels(changes: dict[str, Any], message: str) -> None:

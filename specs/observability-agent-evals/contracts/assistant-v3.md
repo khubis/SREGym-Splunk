@@ -41,14 +41,14 @@ X-Request-ID: <UUID derived deterministically from the anonymous run id>
 ```json
 {
   "prompt": "<exact rendered immutable profile>",
-  "action_instructions": "Use only telemetry for opaque run <run_id>, namespace <namespace>, at or after <attempt_started_at>.",
+  "action_instructions": "Telemetry time window: <started_at> through <ended_at>, inclusive. Investigate using only telemetry within this time window.",
   "session_id": null,
   "model": "<AGENT_MODEL_ID>",
   "reasoning": "<AGENT_REASONING_EFFORT>"
 }
 ```
 
-`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. It contains only the opaque run identity, namespace, attempt start time, and a direction to ignore other runs. The request contains no canonical problem ID, fault, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL.
+`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. It contains only the inclusive UTC start and end timestamps plus a direction to stay within them. It contains no run identity, namespace, canonical problem ID, fault, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL. Assistant tools are not modified or constrained to use an internal run identity.
 
 ## Stream Handling
 
@@ -102,6 +102,6 @@ The immutable v1 substitution IDs cover only direct Kubernetes enumeration, miti
 | `assistant.error` | `assistant_error` | no |
 | empty/conflicting completion | `ambiguous_completion` | no |
 | forbidden Kubernetes tool observed | `capability_policy_violation` | no |
-| foreign run identity or explicitly pre-attempt query observed | `telemetry_scope_violation` | no |
+| explicit absolute tool timestamp outside the supplied window | `telemetry_scope_violation` | no |
 
 All messages are passed through known-secret redaction and contain status/category, not response headers or bodies that can expose credentials.

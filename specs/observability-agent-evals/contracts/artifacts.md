@@ -32,7 +32,7 @@ Contains no headers or credentials:
   "schema": "sregym.assistant_v3.request.v1",
   "problem_id": "anon_<id>",
   "prompt": "<rendered prompt>",
-  "action_instructions": "<opaque execution scope>",
+  "action_instructions": "<inclusive UTC telemetry time window>",
   "prompt_profile_id": "sregym-stratus-diagnosis-v1",
   "prompt_sha256": "<sha256>",
   "reference_sha256": "<sha256>",

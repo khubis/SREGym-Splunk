@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import sys
 import tempfile
 import time
@@ -97,6 +96,7 @@ class DriverRunConfig:
     hec_index: str | None = None
     logs_connection_id: str | None = None
     attempt_started_at: datetime | None = None
+    telemetry_window_ended_at: datetime | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -128,6 +128,11 @@ class DriverRunConfig:
                     if isinstance(payload.get("attempt_started_at"), str)
                     else None
                 ),
+                telemetry_window_ended_at=(
+                    datetime.fromisoformat(payload["telemetry_window_ended_at"].replace("Z", "+00:00"))
+                    if isinstance(payload.get("telemetry_window_ended_at"), str)
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError):
             raise ArtifactError("Assistant driver configuration is incomplete") from None
@@ -146,11 +151,20 @@ class DriverRunConfig:
             raise ArtifactError("judge model and backend must be explicit")
         if self.readiness_report is not None and self.readiness_report.run_id != self.run_id:
             raise ArtifactError("readiness and driver identities must match")
-        if self.attempt_started_at is not None and (
-            self.attempt_started_at.tzinfo is None
-            or self.attempt_started_at.utcoffset() != UTC.utcoffset(self.attempt_started_at)
+        for label, timestamp in (
+            ("attempt start", self.attempt_started_at),
+            ("telemetry window end", self.telemetry_window_ended_at),
         ):
-            raise ArtifactError("attempt start must be UTC")
+            if timestamp is not None and (
+                timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(timestamp)
+            ):
+                raise ArtifactError(f"{label} must be UTC")
+        if (
+            self.attempt_started_at is not None
+            and self.telemetry_window_ended_at is not None
+            and self.telemetry_window_ended_at < self.attempt_started_at
+        ):
+            raise ArtifactError("telemetry window end must not precede its start")
 
 
 class ConductorClient:
@@ -744,7 +758,6 @@ _CLIENT_FAILURES: dict[str, FailureClassification] = {
     "capability_policy_violation": "capability_policy_violation",
 }
 
-_RUN_ID_PATTERN = re.compile(r"anon_[0-9a-f]{32}")
 _ABSOLUTE_START_KEYS = frozenset(
     {
         "from",
@@ -756,19 +769,29 @@ _ABSOLUTE_START_KEYS = frozenset(
         "starttimestamp",
     }
 )
+_ABSOLUTE_END_KEYS = frozenset(
+    {
+        "end",
+        "end_time",
+        "end_timestamp",
+        "endtime",
+        "endtimestamp",
+        "to",
+        "to_time",
+    }
+)
 
 
 def _format_utc(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _build_action_instructions(run_id: str, namespace: str, attempt_started_at: datetime) -> str:
+def _build_action_instructions(window_started_at: datetime, window_ended_at: datetime) -> str:
     return (
-        "Telemetry scope (routing only): investigate only telemetry whose k8s.cluster.name, "
-        "sregym.run.id, deployment.environment, or deployment.environment.name equals "
-        f"{run_id}. The application namespace is {namespace}. Use telemetry at or after "
-        f"{_format_utc(attempt_started_at)} and ignore telemetry from every other run. If current "
-        "scoped telemetry is unavailable, report that instead of using older data."
+        f"Telemetry time window: {_format_utc(window_started_at)} through "
+        f"{_format_utc(window_ended_at)}, inclusive. Investigate using only telemetry within this "
+        "time window. If telemetry is unavailable in this window, report that instead of using "
+        "data outside it."
     )
 
 
@@ -807,20 +830,19 @@ def _absolute_time(value: Any) -> datetime | None:
 
 
 def _scope_violation(
-    events: Iterable[AssistantEvent], *, run_id: str, attempt_started_at: datetime
+    events: Iterable[AssistantEvent], *, window_started_at: datetime, window_ended_at: datetime
 ) -> str | None:
     for event in events:
-        serialized = json.dumps(event.data, sort_keys=True, default=str)
-        if any(found != run_id for found in _RUN_ID_PATTERN.findall(serialized)):
-            return "Assistant tool trace referenced telemetry from another SRE Gym run"
         if event.event != "tool.use":
             continue
         for key, value in _walk_values(event.data):
-            if key not in _ABSOLUTE_START_KEYS:
+            if key not in _ABSOLUTE_START_KEYS and key not in _ABSOLUTE_END_KEYS:
                 continue
             parsed = _absolute_time(value)
-            if parsed is not None and parsed < attempt_started_at:
-                return "Assistant tool trace queried telemetry before the current attempt"
+            if parsed is not None and parsed < window_started_at:
+                return "Assistant tool trace queried telemetry before the provided time window"
+            if parsed is not None and parsed > window_ended_at:
+                return "Assistant tool trace queried telemetry after the provided time window"
     return None
 
 
@@ -847,10 +869,11 @@ def execute_assistant_attempt(
         conductor.require_diagnosis()
         prompt_context = conductor.get_prompt_context()
         rendered = render_prompt(prompt_context)
+        window_started_at = config.attempt_started_at or started_at
+        window_ended_at = config.telemetry_window_ended_at or started_at
         action_instructions = _build_action_instructions(
-            config.run_id,
-            prompt_context["app_namespace"],
-            config.attempt_started_at or started_at,
+            window_started_at,
+            window_ended_at,
         )
         result = assistant.run_session(
             prompt=rendered.text,
@@ -863,8 +886,8 @@ def execute_assistant_attempt(
         retry_count = result.retry_count
         scope_failure = _scope_violation(
             events,
-            run_id=config.run_id,
-            attempt_started_at=config.attempt_started_at or started_at,
+            window_started_at=window_started_at,
+            window_ended_at=window_ended_at,
         )
         if scope_failure is not None:
             terminal = AssistantTerminal(
@@ -964,10 +987,11 @@ def execute_assistant_attempt(
             {"app_name": "unavailable", "app_description": "unavailable", "app_namespace": "unavailable"}
         )
     if action_instructions is None:
+        window_started_at = config.attempt_started_at or started_at
+        window_ended_at = config.telemetry_window_ended_at or started_at
         action_instructions = _build_action_instructions(
-            config.run_id,
-            "unavailable",
-            config.attempt_started_at or started_at,
+            window_started_at,
+            window_ended_at,
         )
     request = AssistantRequest(
         run_id=config.run_id,
