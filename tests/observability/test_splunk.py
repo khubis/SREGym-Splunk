@@ -78,10 +78,12 @@ class FakeBackend:
         self.query_calls: list[tuple[str, str, tuple[str, ...], str]] = []
         self.snapshot_calls: list[str] = []
         self.connection_calls = 0
+        self.requested_connection_ids: list[str | None] = []
         self.closed = False
 
-    def resolve_logs_connection(self, timeout_seconds: float) -> str:
+    def resolve_logs_connection(self, timeout_seconds: float, requested_connection_id: str | None = None) -> str:
         self.connection_calls += 1
+        self.requested_connection_ids.append(requested_connection_id)
         outcome = self.connection_outcomes.pop(0) if self.connection_outcomes else self.connection_id
         if isinstance(outcome, Exception):
             raise outcome
@@ -203,6 +205,12 @@ def test_config_defaults_logs_index_to_main():
     assert SplunkConfig.from_env(valid_environment()).hec_index == "main"
 
 
+def test_config_accepts_an_explicit_logs_connection_id():
+    config = SplunkConfig.from_env(valid_environment(SPLUNK_LOGS_CONNECTION_ID="HPEC1vyAAAA"))
+
+    assert config.logs_connection_id == "HPEC1vyAAAA"
+
+
 @pytest.mark.parametrize("port", ("", "8088/tcp", "０８０８", "0", "65536", "-1"))
 def test_config_rejects_invalid_hec_ports(port):
     with pytest.raises(ProviderError, match="SPLUNK_HEC_PORT"):
@@ -216,6 +224,7 @@ def test_config_rejects_invalid_hec_ports(port):
         ({"SPLUNK_HOST": "user@example.com"}, "SPLUNK_HOST"),
         ({"SPLUNK_HOST": "example.com/path"}, "SPLUNK_HOST"),
         ({"SPLUNK_HEC_INDEX": "logs,other"}, "SPLUNK_HEC_INDEX"),
+        ({"SPLUNK_LOGS_CONNECTION_ID": "connection id"}, "SPLUNK_LOGS_CONNECTION_ID"),
         ({"SFX_REALM": "https://us0"}, "SFX_REALM"),
     ),
 )
@@ -370,6 +379,20 @@ def test_preflight_checks_helm_without_persisting_credentials():
 
     assert provider.preflight() is None
     assert commands == [(["helm", "version", "--short"], None)]
+
+
+def test_preflight_resolves_the_configured_logs_connection():
+    backend = FakeBackend()
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment(SPLUNK_LOGS_CONNECTION_ID="HPEC1vyAAAA")),
+        core_api=Mock(),
+        run=successful_command,
+        backend=backend,
+    )
+
+    provider.preflight()
+
+    assert backend.requested_connection_ids == ["HPEC1vyAAAA"]
 
 
 @pytest.mark.parametrize(
@@ -678,6 +701,58 @@ def test_http_backend_selects_accessible_default_then_first_accessible(connectio
     assert payload["operationName"] == "getConnections"
     assert requests[0].headers["x-sf-token"] == ACCESS_TOKEN
     backend.close()
+
+
+def test_http_backend_selects_an_explicit_accessible_connection_over_the_default():
+    connections = [
+        {
+            "connectionID": "default",
+            "connectionName": "default",
+            "isDefaultConnection": True,
+            "isAccessible": True,
+        },
+        {
+            "connectionID": "requested",
+            "connectionName": "requested",
+            "isDefaultConnection": False,
+            "isAccessible": True,
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"getConnections": connections}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert backend.resolve_logs_connection(2.0, "requested") == "requested"
+
+
+def test_http_backend_rejects_an_inaccessible_explicit_connection():
+    connections = [
+        {
+            "connectionID": "requested",
+            "connectionName": "requested",
+            "isDefaultConnection": True,
+            "isAccessible": False,
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"getConnections": connections}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SplunkBackendError) as raised:
+        backend.resolve_logs_connection(2.0, "requested")
+
+    assert raised.value.status_code == 400
+    assert raised.value.transient is False
 
 
 def test_http_backend_rejects_missing_accessible_logs_connection():

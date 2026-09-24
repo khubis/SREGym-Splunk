@@ -52,6 +52,7 @@ _HOST_PATTERN = re.compile(
 )
 _REALM_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _INDEX_PATTERN = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_CONNECTION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
 _DEFAULT_VALUES_PATH = Path(__file__).parents[1] / "observer" / "splunk" / "values.yaml"
 
 
@@ -109,7 +110,7 @@ class SplunkBackendError(RuntimeError):
 
 
 class SplunkQueryBackend(Protocol):
-    def resolve_logs_connection(self, timeout_seconds: float) -> str: ...
+    def resolve_logs_connection(self, timeout_seconds: float, requested_connection_id: str | None = None) -> str: ...
 
     def query_signal(
         self,
@@ -182,7 +183,7 @@ class SplunkHttpBackend:
         self._trace_jobs: dict[str, str] = {}
         self._log_jobs: dict[tuple[str, SignalName], str] = {}
 
-    def resolve_logs_connection(self, timeout_seconds: float) -> str:
+    def resolve_logs_connection(self, timeout_seconds: float, requested_connection_id: str | None = None) -> str:
         payload = self._graphql(
             f"{self._app_base}/v2/logs/graphql",
             "getConnections",
@@ -192,9 +193,12 @@ class SplunkHttpBackend:
         )
         connections = payload.get("data", {}).get("getConnections", [])
         accessible = [item for item in connections if item.get("isAccessible") and item.get("connectionID")]
-        selected = next((item for item in accessible if item.get("isDefaultConnection")), None)
-        if selected is None and accessible:
-            selected = accessible[0]
+        if requested_connection_id is not None:
+            selected = next((item for item in accessible if item.get("connectionID") == requested_connection_id), None)
+        else:
+            selected = next((item for item in accessible if item.get("isDefaultConnection")), None)
+            if selected is None and accessible:
+                selected = accessible[0]
         if selected is None:
             raise SplunkBackendError(status_code=400, transient=False)
         return cast(str, selected["connectionID"])
@@ -573,6 +577,7 @@ class SplunkConfig:
     hec_port: int
     hec_token: str = field(repr=False)
     hec_index: str = "main"
+    logs_connection_id: str | None = None
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> "SplunkConfig":
@@ -585,6 +590,7 @@ class SplunkConfig:
         realm = source["SFX_REALM"].strip()
         port_text = source["SPLUNK_HEC_PORT"].strip()
         index = source.get("SPLUNK_HEC_INDEX", "main").strip()
+        logs_connection_id = source.get("SPLUNK_LOGS_CONNECTION_ID", "").strip() or None
         if _HOST_PATTERN.fullmatch(host) is None:
             raise ProviderError("configuration", "SPLUNK_HOST must be a hostname without a scheme, port, or path")
         if _REALM_PATTERN.fullmatch(realm) is None:
@@ -596,6 +602,8 @@ class SplunkConfig:
             raise ProviderError("configuration", "SPLUNK_HEC_PORT must be between 1 and 65535")
         if _INDEX_PATTERN.fullmatch(index) is None:
             raise ProviderError("configuration", "SPLUNK_HEC_INDEX has an invalid format")
+        if logs_connection_id is not None and _CONNECTION_ID_PATTERN.fullmatch(logs_connection_id) is None:
+            raise ProviderError("configuration", "SPLUNK_LOGS_CONNECTION_ID has an invalid format")
 
         return cls(
             access_token=source["SF_TOKEN"].strip(),
@@ -605,6 +613,7 @@ class SplunkConfig:
             hec_port=port,
             hec_token=source["SPLUNK_HEC_TOKEN"].strip(),
             hec_index=index,
+            logs_connection_id=logs_connection_id,
         )
 
     @property
@@ -863,7 +872,10 @@ class SplunkObservabilityProvider:
         started = self._monotonic()
         for attempt in range(self._policy.max_attempts):
             try:
-                return self._query_backend().resolve_logs_connection(self._policy.request_timeout_seconds)
+                return self._query_backend().resolve_logs_connection(
+                    self._policy.request_timeout_seconds,
+                    self.configuration.logs_connection_id,
+                )
             except SplunkBackendError as error:
                 if not error.transient:
                     self._raise_backend_error(error, None)

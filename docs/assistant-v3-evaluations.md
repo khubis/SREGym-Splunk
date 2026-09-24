@@ -17,7 +17,7 @@ docker info >/dev/null
 helm version --short
 ```
 
-The Assistant URL must be reachable from the isolated agent container. The Splunk org must have an accessible Logs Observer connection; the provider selects the accessible default connection, or the first accessible connection when no default exists. Do not add connection, service, scenario, or time-window hints to the model prompt.
+The Assistant URL must be reachable from the isolated agent container. The Splunk org must have an accessible Logs Observer connection. Set `SPLUNK_LOGS_CONNECTION_ID` when the HEC destination is not the org's default connection; otherwise, the provider selects the accessible default connection, or the first accessible connection when no default exists. Do not add connection, service, scenario, or time-window hints to the model prompt.
 
 Keep credentials in the process environment or a gitignored local `.env`. The runner does not automatically source `.env`; review it and load it in the shell before running commands. Never commit it or print its contents.
 
@@ -32,6 +32,7 @@ Keep credentials in the process environment or a gitignored local `.env`. The ru
 | `SPLUNK_HEC_PORT` | Numeric TLS HEC port |
 | `SPLUNK_HEC_TOKEN` | HEC token for container logs and Kubernetes events |
 | `SPLUNK_HEC_INDEX` | Optional HEC index; defaults to `main` and must be allowed by the HEC token |
+| `SPLUNK_LOGS_CONNECTION_ID` | Optional Logs Observer connection ID for the HEC destination; use it when that destination is not the org default |
 | `JUDGE_API_BASE` | Judge endpoint when the selected API backend requires one |
 | `JUDGE_API_KEY` | Judge credential when the selected API backend requires one |
 | `SSL_CERT_FILE` | Optional readable CA bundle for Dockerized CLI judges behind enterprise TLS inspection |
