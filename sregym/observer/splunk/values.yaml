@@ -57,6 +57,18 @@ clusterReceiver:
       cpu: 300m
       memory: 512Mi
 
+# Keep benchmark application logs while avoiding unrelated harness and
+# collector history on the long-lived kind nodes.
+logsCollection:
+  containers:
+    excludePaths:
+      - /var/log/pods/chaos-mesh_*/*/*.log
+      - /var/log/pods/khaos_*/*/*.log
+      - /var/log/pods/kube-system_*/*/*.log
+      - /var/log/pods/observe_*/*/*.log
+      - /var/log/pods/openebs_*/*/*.log
+      - /var/log/pods/sregym-observability_*/*/*.log
+
 gateway:
   enabled: true
   tokenPassthrough: false

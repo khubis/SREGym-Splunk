@@ -234,6 +234,14 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
         "jaeger-thrift": None,
         "jaeger-grpc": None,
     }
+    assert values["logsCollection"]["containers"]["excludePaths"] == [
+        "/var/log/pods/chaos-mesh_*/*/*.log",
+        "/var/log/pods/khaos_*/*/*.log",
+        "/var/log/pods/kube-system_*/*/*.log",
+        "/var/log/pods/observe_*/*/*.log",
+        "/var/log/pods/openebs_*/*/*.log",
+        "/var/log/pods/sregym-observability_*/*/*.log",
+    ]
     for workload in ("agent", "clusterReceiver", "gateway"):
         resources = values[workload]["resources"]
         assert set(resources) == {"requests", "limits"}
