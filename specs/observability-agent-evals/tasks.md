@@ -131,7 +131,7 @@ Traceability is a live checklist: each row names the focused test locations that
 | R5 | Assistant client/driver golden artifacts plus `tests/traces/test_assistant_v3_adapter.py` and the complete trace suite |
 | R6 | Driver metric golden cases, delivery invalidation cases, ATIF usage/error mapping, and explicit judge metadata tests |
 | R7 | Splunk retry/drain tests, Assistant stream retry/failure tests, campaign abort/resume, Conductor cleanup, and provider-close tests |
-| R8 | CLI option/help test, deterministic artifact fixtures, and direct prompt/diagnosis/tool/delivery inspection coverage; operator documentation remains the explicit scope of Task L |
+| R8 | CLI option/help test, deterministic artifact fixtures, tested operator workflow, and direct prompt/diagnosis/tool/delivery inspection coverage |
 | R9 | Fail-first evidence in A–K, focused suites, secret scan, 100% new-module branch coverage, and 100% changed-production-line coverage |
 
 ### Changed production file-to-test traceability
@@ -152,7 +152,9 @@ Traceability is a live checklist: each row names the focused test locations that
 
 ## [workflow/docs] Operator Experience
 
-- [ ] **L. Document reproducible commands and a no-code spot check** — Add tested documentation for prerequisites, environment names without values, preflight, one full-profile case, svelte non-comparable smoke, Lite suite, resume, artifact locations, delivery report interpretation, capability/model/judge metadata, and failure recovery. Provide a small read-only inspection command that prints prompt hash/text location, final diagnosis, tool/error totals, delivery validity/lag/drop/queue evidence, judge result, and failure classification without exposing credentials. Requirements: R6–R9. Planned commit: `docs(evals): add assistant v3 benchmark workflow`.
+- [x] **L. Document reproducible commands and a no-code spot check** — Add tested documentation for prerequisites, environment names without values, preflight, one full-profile case, svelte non-comparable smoke, Lite suite, resume, artifact locations, delivery report interpretation, capability/model/judge metadata, and failure recovery. Provide a small read-only inspection command that prints prompt hash/text location, final diagnosis, tool/error totals, delivery validity/lag/drop/queue evidence, judge result, and failure classification without exposing credentials. Requirements: R6–R9. Planned commit: `docs(evals): add assistant v3 benchmark workflow`.
+
+  Evidence: three documentation-contract tests first failed because the workflow guide did not exist. The completed guide provides copyable full-profile, explicitly non-comparable svelte, Lite-suite, and resume commands; identifies only environment-variable names; documents stable artifacts, comparability metadata, bounded delivery evidence, and failure recovery; and preserves the benchmark prompt, scenario, oracle, and judge behavior. Its embedded standard-library spot check is executed against both valid and infrastructure-invalid golden runs and reports prompt provenance, diagnosis, tool/error totals, delivery lag/failure/queue evidence, judge output, configuration, and failure classification without reading or printing credentials or modifying artifacts. The complete Assistant driver suite has 102 passing tests with 100% statement/branch coverage; Ruff and Pyright pass for the touched Python test file.
 
 ## [live] Credentialed Acceptance (No Product-Code Commit)
 

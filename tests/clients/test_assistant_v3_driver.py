@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import re
+import shutil
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +49,7 @@ OTHER_RUN_ID = "anon_ffffffffffffffffffffffffffffffff"
 PROMPT = "Investigate the application and diagnose the root cause."
 STARTED_AT = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "assistant_v3" / "golden_infrastructure_invalid"
+WORKFLOW_DOC = Path(__file__).parents[2] / "docs" / "assistant-v3-evaluations.md"
 SECRET = "fixture-secret-that-must-never-be-written"
 
 
@@ -1352,3 +1358,114 @@ def test_atomic_directory_creation_failure_is_classified(tmp_path: Path, monkeyp
     monkeypatch.setattr(Path, "mkdir", fail_mkdir)
     with pytest.raises(ArtifactError, match="atomically"):
         AssistantArtifactStore(tmp_path / "missing").write(completed_bundle())
+
+
+def _documented_spotcheck() -> str:
+    text = WORKFLOW_DOC.read_text(encoding="utf-8")
+    match = re.search(
+        r"<!-- BEGIN ASSISTANT_V3_SPOT_CHECK -->.*?uv run python - \"\$RUN_DIR\" <<'PY'\n(.*?)\nPY",
+        text,
+        re.DOTALL,
+    )
+    assert match is not None
+    return match.group(1)
+
+
+def _spotcheck_run(tmp_path: Path, *, valid: bool) -> dict[str, Any]:
+    run_dir = tmp_path / ("valid" if valid else "invalid")
+    shutil.copytree(GOLDEN, run_dir)
+    with (run_dir / "case_results.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["Diagnosis.success", "Diagnosis.judgment", "Diagnosis.accuracy"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "Diagnosis.success": "True",
+                "Diagnosis.judgment": "True",
+                "Diagnosis.accuracy": "92.5",
+            }
+        )
+    if valid:
+        (run_dir / "failure.json").unlink()
+        metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+        metadata["classification"] = "completed"
+        metadata["included_in_diagnosis_pass_rate"] = True
+        (run_dir / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        delivery = json.loads((run_dir / "observability" / "delivery.json").read_text(encoding="utf-8"))
+        delivery["valid"] = True
+        delivery["send_failed_delta"]["logs"] = 0
+        (run_dir / "observability" / "delivery.json").write_text(json.dumps(delivery), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-", str(run_dir)],
+        input=_documented_spotcheck(),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "", "SPLUNK_HEC_TOKEN": SECRET, "ASSISTANT_V3_AUTH_TOKEN": SECRET},
+    )
+    assert result.returncode == 0, result.stderr
+    assert SECRET not in result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def test_assistant_v3_workflow_documents_reproducible_bounded_commands() -> None:
+    text = WORKFLOW_DOC.read_text(encoding="utf-8")
+    for required in (
+        "ASSISTANT_V3_URL",
+        "ASSISTANT_V3_AUTH_TOKEN",
+        "SF_TOKEN",
+        "SFX_REALM",
+        "SPLUNK_HOST",
+        "SPLUNK_HEC_PORT",
+        "SPLUNK_HEC_TOKEN",
+        "--problem edge_request_filter_cpu_saturation",
+        "--profile full",
+        "--profile svelte",
+        "--suite sregym-lite",
+        "--resume",
+        "--stages diagnosis",
+        "--agent assistant_v3",
+        "--model gpt-5.6-luna",
+        "--reasoning-effort medium",
+        "--judge-model",
+        "--judge-backend api",
+        "--observability-provider splunk",
+        "--allow-agent-endpoint \"$ASSISTANT_V3_URL\"",
+        "splunk_o11y_read_only_no_direct_kubernetes",
+        "included_in_diagnosis_pass_rate",
+        "results/<batch>/assistant_v3/<problem_id>/run_<attempt>/",
+    ):
+        assert required in text
+    assert "SPLUNK_HEC_TOKEN=" not in text
+    assert "ASSISTANT_V3_AUTH_TOKEN=" not in text
+
+
+def test_documented_spotcheck_reports_success_without_credentials(tmp_path: Path) -> None:
+    summary = _spotcheck_run(tmp_path, valid=True)
+    expected_request = json.loads((GOLDEN / "assistant_v3" / "request.json").read_text(encoding="utf-8"))
+
+    assert summary["prompt"]["sha256"] == expected_request["prompt_sha256"]
+    assert summary["prompt"]["text_path"].endswith("assistant_v3/request.json")
+    assert summary["diagnosis"] == "Root cause: dependency saturation."
+    assert summary["tools"] == {"calls": 2, "failed_results": 2}
+    assert summary["delivery"]["valid"] is True
+    assert summary["judge"] == {"accuracy": "92.5", "judgment": "True", "success": "True"}
+    assert summary["failure"]["classification"] == "completed"
+
+
+def test_documented_spotcheck_reports_invalid_delivery_and_failure(tmp_path: Path) -> None:
+    summary = _spotcheck_run(tmp_path, valid=False)
+
+    assert summary["delivery"]["valid"] is False
+    assert summary["delivery"]["send_failed_delta"]["logs"] == 1
+    assert summary["delivery"]["drained"] is True
+    assert summary["failure"] == {
+        "classification": "infrastructure_invalid",
+        "cleanup_status": "completed",
+        "included_in_diagnosis_pass_rate": False,
+        "phase": "delivery",
+        "safe_message": "Post-execution telemetry delivery verification failed",
+    }
