@@ -337,13 +337,18 @@ def test_provider_readiness_failure_publishes_pre_agent_artifacts(monkeypatch, t
     error = ProviderError("readiness_timeout", "signals unavailable")
     conductor = _driver_conductor(start_result=error)
     run = _fake_run(tmp_path)
+    published_run = tmp_path / "results" / "batch" / "assistant_v3" / "problem" / "run_1"
+    published_run.mkdir(parents=True)
+    run.finalize_and_publish.return_value = published_run
     launcher = _configure_driver_test(benchmark_main, monkeypatch, tmp_path, conductor, run)
     provider = SimpleNamespace(name="splunk")
     driver_config = object()
     monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=driver_config))
     monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
     write_failure = Mock()
+    checkpoint = Mock()
     monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", write_failure)
+    monkeypatch.setattr(benchmark_main, "checkpoint_assistant_attempt", checkpoint)
     monkeypatch.setattr(benchmark_main.AssistantV3Config, "from_env", Mock(return_value=object()))
 
     results = benchmark_main.driver_loop(
@@ -359,6 +364,8 @@ def test_provider_readiness_failure_publishes_pre_agent_artifacts(monkeypatch, t
     assert conductor.results["included_in_diagnosis_pass_rate"] is False
     write_failure.assert_called_once()
     run.finalize_and_publish.assert_called_once()
+    checkpoint.assert_called_once()
+    assert checkpoint.call_args.args[1] == published_run
     launcher.ensure_started.assert_not_awaited()
     assert results[0]["assistant_v3"][0]["deploy_failed"] is True
 

@@ -642,11 +642,13 @@ def driver_loop(
                             prompt_context=_assistant_prompt_context(conductor),
                         )
                         failure_fields = sorted({key for row in [*all_results_for_agent, snapshot] for key in row})
-                        run.finalize_and_publish(
+                        published_run_dir = run.finalize_and_publish(
                             snapshot=snapshot,
                             fieldnames=failure_fields,
                             ownership_image=LAUNCHER.container_image,
                         )
+                        scorecard_path = checkpoint_assistant_attempt(base_dir, published_run_dir)
+                        logger.info(f"📊 Assistant v3 campaign scorecard updated at {scorecard_path}")
                     all_results_for_agent.append(snapshot)
                     fieldnames = sorted({key for row in all_results_for_agent for key in row})
                     with open(tmp_path, "w", newline="") as csvfile:
