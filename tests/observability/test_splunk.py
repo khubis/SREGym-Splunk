@@ -1267,6 +1267,120 @@ def test_http_backend_restarts_incomplete_trace_response_without_job_id():
     assert operations == ["StartAnalyticsSearch", "StartAnalyticsSearch"]
 
 
+def test_http_backend_restarts_trace_job_after_poll_error():
+    operations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = json.loads(request.content)["operationName"]
+        operations.append(operation)
+        if operation == "StartAnalyticsSearch":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "startAnalyticsSearch": {
+                            "jobId": "trace-job",
+                            "sections": [{"sectionType": "traceExamples", "isComplete": False}],
+                        }
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": None, "errors": [{"message": "trace job failed"}]})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    arguments = (
+        "traces",
+        attempt_context(),
+        ApplicationScope("social-network", ("social-network",)),
+        "connection-default",
+        NOW,
+        2.0,
+    )
+
+    assert backend.query_signal(*arguments) == 0
+    with pytest.raises(SplunkBackendError):
+        backend.query_signal(*arguments)
+    assert backend.query_signal(*arguments) == 0
+    assert operations == ["StartAnalyticsSearch", "GetAnalyticsSearch", "StartAnalyticsSearch"]
+
+
+def test_http_backend_treats_live_empty_trace_data_list_as_zero_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "startAnalyticsSearch": {
+                        "jobId": "trace-job",
+                        "sections": [
+                            {
+                                "sectionType": "traceExamples",
+                                "isComplete": False,
+                                "data": [],
+                                "legacyTraceExamples": [],
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert (
+        backend.query_signal(
+            "traces",
+            attempt_context(),
+            ApplicationScope("social-network", ("social-network",)),
+            "connection-default",
+            NOW,
+            2.0,
+        )
+        == 0
+    )
+
+
+def test_http_backend_treats_live_null_log_results_as_zero_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = json.loads(request.content)["operationName"]
+        if operation == "createSearchJob":
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": "job-1"}}})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "searchJob": {
+                        "status": "RUNNING",
+                        "results": {"fields": [], "results": None},
+                    }
+                }
+            },
+        )
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert (
+        backend.query_signal(
+            "logs",
+            attempt_context(),
+            ApplicationScope("social-network", ("social-network",)),
+            "connection-default",
+            NOW,
+            2.0,
+        )
+        == 0
+    )
+
+
 @pytest.mark.parametrize(
     "body",
     (

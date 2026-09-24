@@ -25,6 +25,7 @@ POLICY_NAME = EGRESS_POLICY_NAME
 POLICY_LABEL_KEY = "network-access"
 POLICY_LABEL_VALUE = "restricted"
 CLUSTER_DNS_SELECTOR = "projectcalico.org/namespace == 'kube-system' && k8s-app == 'kube-dns'"
+EXTERNAL_TELEMETRY_SELECTOR = "projectcalico.org/namespace == 'sregym-observability'"
 DOCKER_DNS_LOOPBACK = "127.0.0.11/32"
 
 
@@ -224,6 +225,10 @@ class ClusterEgressBoundary:
             for protocol in ("UDP", "TCP")
             for destination in dns_destinations
         ]
+        # External observability gateways must forward benchmark telemetry to
+        # their configured destination. Keep the exception confined to the
+        # harness-owned namespace; evaluated workloads remain denied below.
+        rules.append({"action": "Pass", "source": {"selector": EXTERNAL_TELEMETRY_SELECTOR}})
         if ipv4:
             rules.append(
                 {

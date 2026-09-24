@@ -218,16 +218,12 @@ class SplunkHttpBackend:
             search = payload.get("data", {}).get("startAnalyticsSearch") or payload.get("data", {}).get(
                 "getAnalyticsSearch", {}
             )
-            sections = search.get("sections", []) if isinstance(search, dict) else []
+            sections = _trace_sections(search)
             examples = [
                 example
                 for section in sections
                 if section.get("sectionType") == "traceExamples"
-                for example in (
-                    section.get("traceExamples")
-                    or section.get("legacyTraceExamples")
-                    or section.get("data", {}).get("traceExamples", [])
-                )
+                for example in _trace_examples(section)
             ]
             return len(examples)
         return self._query_logs(signal, context, scope, connection_id, checked_at, timeout_seconds)
@@ -324,7 +320,12 @@ class SplunkHttpBackend:
             timeout_seconds,
         )
         job = result.get("data", {}).get("searchJob", {})
-        rows = job.get("results", {}).get("results", [])
+        result_set = job.get("results", {}) if isinstance(job, dict) else {}
+        rows = result_set.get("results") if isinstance(result_set, dict) else None
+        if rows is None:
+            rows = []
+        if not isinstance(rows, list):
+            raise SplunkBackendError(status_code=500, transient=True)
         if str(job.get("status", "")).strip().lower() in _COMPLETE_JOB_STATUSES:
             self._log_jobs.pop(job_key, None)
         return len(rows)
@@ -338,13 +339,17 @@ class SplunkHttpBackend:
     ) -> dict[str, Any]:
         job_id = self._trace_jobs.get(context.run_id)
         if job_id is not None:
-            payload = self._graphql(
-                f"{self._app_base}/v2/apm/graphql",
-                "GetAnalyticsSearch",
-                _GET_TRACE_QUERY,
-                {"jobId": job_id},
-                timeout_seconds,
-            )
+            try:
+                payload = self._graphql(
+                    f"{self._app_base}/v2/apm/graphql",
+                    "GetAnalyticsSearch",
+                    _GET_TRACE_QUERY,
+                    {"jobId": job_id},
+                    timeout_seconds,
+                )
+            except SplunkBackendError:
+                self._trace_jobs.pop(context.run_id, None)
+                raise
             field = "getAnalyticsSearch"
         else:
             tags = [
@@ -377,7 +382,7 @@ class SplunkHttpBackend:
             )
             field = "startAnalyticsSearch"
         search = payload.get("data", {}).get(field, {})
-        sections = search.get("sections", []) if isinstance(search, dict) else []
+        sections = _trace_sections(search)
         complete = any(
             section.get("sectionType") == "traceExamples" and section.get("isComplete") for section in sections
         )
@@ -490,6 +495,34 @@ class SplunkHttpBackend:
 
 def _optional_int(value: float | None) -> int | None:
     return None if value is None else int(value)
+
+
+def _trace_sections(search: object) -> list[Mapping[str, Any]]:
+    if not isinstance(search, dict):
+        return []
+    sections = search.get("sections")
+    if sections is None:
+        return []
+    if not isinstance(sections, list) or any(not isinstance(section, dict) for section in sections):
+        raise SplunkBackendError(status_code=500, transient=True)
+    return cast(list[Mapping[str, Any]], sections)
+
+
+def _trace_examples(section: Mapping[str, Any]) -> list[Any]:
+    candidates: list[object] = [section.get("traceExamples"), section.get("legacyTraceExamples")]
+    data = section.get("data")
+    if isinstance(data, dict):
+        candidates.append(data.get("traceExamples"))
+    elif data is not None:
+        candidates.append(data)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if not isinstance(candidate, list):
+            raise SplunkBackendError(status_code=500, transient=True)
+        if candidate:
+            return candidate
+    return []
 
 
 def _counter_delta(opening: int | None, closing: int | None) -> int | None:

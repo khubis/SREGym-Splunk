@@ -6,6 +6,7 @@ from kubernetes.client.rest import ApiException
 from sregym.service.cluster_egress import (
     CLUSTER_DNS_SELECTOR,
     DOCKER_DNS_LOOPBACK,
+    EXTERNAL_TELEMETRY_SELECTOR,
     POLICY_NAME,
     POLICY_PLURAL,
     POLICY_TIER,
@@ -122,10 +123,12 @@ def test_dns_exception_precedes_external_deny_and_preserves_lower_tier_policies(
     ]
     assert CLUSTER_DNS_SELECTOR == "projectcalico.org/namespace == 'kube-system' && k8s-app == 'kube-dns'"
     assert DOCKER_DNS_LOOPBACK == "127.0.0.11/32"
+    assert rules[4] == {"action": "Pass", "source": {"selector": EXTERNAL_TELEMETRY_SELECTOR}}
+    assert EXTERNAL_TELEMETRY_SELECTOR == "projectcalico.org/namespace == 'sregym-observability'"
     # Public DNS stays restricted to port 53. Dynamic ports apply only to the
     # exact Docker resolver address, not other loopback or node addresses.
     assert all("ipVersion" not in rule for rule in rules[:4])
-    assert [(rule["action"], rule.get("ipVersion")) for rule in rules[4:]] == [
+    assert [(rule["action"], rule.get("ipVersion")) for rule in rules[5:]] == [
         ("Deny", 4),
         ("Deny", 6),
         ("Pass", None),
