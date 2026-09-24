@@ -347,10 +347,11 @@ def convert_run(run_dir: Path | str) -> Trajectory | None:
         assistant_meta = (trajectory.extra or {}).get("assistant_v3")
         if isinstance(assistant_meta, dict):
             completion_step = assistant_meta.get("completion_step")
-            if isinstance(completion_step, int):
+            submitted = assistant_meta.get("submitted")
+            if submitted is True and isinstance(completion_step, int):
                 sregym_meta["diagnosis_submitted_step"] = completion_step
-            if "submitted" not in sregym_meta and isinstance(assistant_meta.get("submitted"), bool):
-                sregym_meta["submitted"] = assistant_meta["submitted"]
+            if "submitted" not in sregym_meta and isinstance(submitted, bool):
+                sregym_meta["submitted"] = submitted
 
     # Boundary detection runs on the assembled trajectory; add it only when a
     # submission is found. Always (re)attach the assembled metadata so a run

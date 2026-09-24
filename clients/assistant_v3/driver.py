@@ -783,7 +783,7 @@ _ABSOLUTE_END_KEYS = frozenset(
 
 
 def _format_utc(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="auto").replace("+00:00", "Z")
 
 
 def _build_action_instructions(window_started_at: datetime, window_ended_at: datetime) -> str:

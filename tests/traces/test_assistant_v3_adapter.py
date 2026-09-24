@@ -209,6 +209,57 @@ def test_incomplete_error_stream_remains_valid_without_a_fabricated_answer(tmp_p
     assert trajectory.extra["assistant_v3"]["submitted"] is False
 
 
+def test_scope_violation_preserves_completed_answer_without_marking_it_submitted(tmp_path: Path) -> None:
+    source_records = _records(FIXTURE / "assistant_v3" / "events.jsonl")
+    native_events = [
+        _event(1, "message.delta", {"text": "Diagnosis from out-of-scope telemetry."}),
+        _event(
+            2,
+            "message.complete",
+            {
+                "final_text": "Diagnosis from out-of-scope telemetry.",
+                "session_id": "session-1",
+            },
+        ),
+    ]
+    terminal = json.loads((FIXTURE / "assistant_v3" / "terminal.json").read_text())
+    terminal.update(
+        {
+            "outcome": "telemetry_scope_violation",
+            "final_text": None,
+            "submitted": False,
+            "submission_count": 0,
+            "session_id": "session-1",
+        }
+    )
+    metadata = json.loads((FIXTURE / "run_metadata.json").read_text())
+    metadata["classification"] = "telemetry_scope_violation"
+    run_dir = _materialize_run(
+        tmp_path,
+        events=[source_records[0], *native_events],
+        terminal=terminal,
+        metadata=metadata,
+    )
+
+    trajectory = convert(run_dir / "assistant_v3" / "events.jsonl")
+
+    assert [step.message for step in trajectory.steps] == [
+        "Investigate the application and diagnose the root cause.",
+        "Diagnosis from out-of-scope telemetry.",
+    ]
+    assert trajectory.extra is not None
+    assert trajectory.extra["assistant_v3"]["terminal_outcome"] == "telemetry_scope_violation"
+    assert trajectory.extra["assistant_v3"]["submitted"] is False
+    assert trajectory.extra["assistant_v3"]["completion_step"] == 2
+
+    normalized = run_converter.convert_run(run_dir)
+
+    assert normalized is not None
+    assert normalized.extra is not None
+    assert normalized.extra["sregym"]["submitted"] is False
+    assert "diagnosis_submitted_step" not in normalized.extra["sregym"]
+
+
 def test_maps_thinking_progress_fallback_tools_and_subagent_errors(tmp_path: Path) -> None:
     header = _records(FIXTURE / "assistant_v3" / "events.jsonl")[0]
     native_events = [

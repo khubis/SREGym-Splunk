@@ -970,6 +970,32 @@ def test_scope_validator_rejects_explicit_pre_attempt_windows_and_allows_current
     )
 
 
+def test_action_window_preserves_subsecond_precision_used_by_scope_validator() -> None:
+    precise_start = STARTED_AT.replace(microsecond=291_000)
+    precise_end = WINDOW_ENDED_AT.replace(microsecond=88_000)
+    instructions = driver_module._build_action_instructions(precise_start, precise_end)
+
+    assert "2026-09-23T12:00:00.291000Z" in instructions
+    assert "2026-09-23T12:05:00.088000Z" in instructions
+
+    bounded_query = event(
+        1,
+        1.0,
+        "tool.use",
+        {
+            "input": {
+                "start": "2026-09-23T12:00:00.291000Z",
+                "end": "2026-09-23T12:05:00.088000Z",
+            }
+        },
+    )
+    assert driver_module._scope_violation(
+        (bounded_query,),
+        window_started_at=precise_start,
+        window_ended_at=precise_end,
+    ) is None
+
+
 def test_driver_preserves_invalid_stream_and_never_submits_it(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 

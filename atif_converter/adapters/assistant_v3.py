@@ -42,8 +42,10 @@ _TERMINAL_OUTCOMES = frozenset(
         "ambiguous_completion",
         "capability_policy_violation",
         "infrastructure_invalid",
+        "telemetry_scope_violation",
     }
 )
+_STREAM_COMPLETION_OUTCOMES = frozenset({"completed", "telemetry_scope_violation"})
 
 
 @dataclass(frozen=True)
@@ -409,21 +411,31 @@ def convert_file(session_file: Path | str) -> Trajectory:
 
     outcome = terminal.get("outcome")
     terminal_text = terminal.get("final_text")
-    if outcome == "completed":
-        if completion_event is None or not isinstance(terminal_text, str) or not terminal_text.strip():
-            raise ValueError("Completed Assistant artifacts require one final response")
+    if outcome in _STREAM_COMPLETION_OUTCOMES:
+        if completion_event is None:
+            raise ValueError("Completed Assistant streams require one final response")
         event_text = completion_event.data.get("final_text", completion_event.data.get("text"))
-        if event_text != terminal_text:
-            raise ValueError("Assistant completion and terminal final text do not match")
+        if not isinstance(event_text, str) or not event_text.strip():
+            raise ValueError("Completed Assistant streams require final response text")
+        if outcome == "completed":
+            if not isinstance(terminal_text, str) or not terminal_text.strip():
+                raise ValueError("Completed Assistant artifacts require terminal response text")
+            if event_text != terminal_text:
+                raise ValueError("Assistant completion and terminal final text do not match")
+            final_text = terminal_text
+        else:
+            if terminal_text is not None:
+                raise ValueError("Rejected Assistant completion must not be marked as submitted output")
+            final_text = event_text
         streamed_text = "".join(delta_text)
-        if terminal_text == streamed_text and delta_steps:
+        if final_text == streamed_text and delta_steps:
             delta_extra = delta_steps[-1].extra
             assert delta_extra is not None
             native = delta_extra["assistant_v3"]
             native["completion_sequence"] = completion_event.sequence
             final_step_id = delta_steps[-1].step_id
         else:
-            completion_text = terminal_text.removeprefix(streamed_text) if streamed_text else terminal_text
+            completion_text = final_text.removeprefix(streamed_text) if streamed_text else final_text
             final_step = _append_step(
                 steps,
                 source="agent",
