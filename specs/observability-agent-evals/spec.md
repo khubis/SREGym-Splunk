@@ -12,6 +12,7 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - As an engineer debugging a run, I want complete raw and normalized artifacts, including partial-failure artifacts, so that I can reconstruct what happened without rerunning the incident.
 - As an open-source maintainer, I want observability-provider behavior separated from Cisco-specific agent behavior so that reusable pieces can be contributed independently.
 - As a reviewer, I want every production change traceable to an approved requirement and an automated test so that the first merge request remains understandable and bounded.
+- As an evaluation owner, I want a crash-resilient per-case scorecard and a post-run proof that root-cause telemetry existed so that poor agent diagnoses can be distinguished from missing benchmark data.
 
 ## Requirements
 
@@ -101,6 +102,14 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - Before submission, the driver MUST fail closed with `telemetry_scope_violation` when a recorded tool call contains an explicit absolute timestamp outside the supplied window. The trace MUST remain available and the attempt MUST be excluded from diagnosis scoring. The harness MUST NOT reject an attempt merely because a foreign run identity appears in tool output.
 - The first pilot MUST run the first ten cases in `SREGYM_LITE_PROBLEMS`, in their registered order, once each and sequentially. Reports MUST show every attempt and aggregate diagnosis scores only across valid attempts.
 
+### R11. Durable scorecard and post-run telemetry audit
+
+- A completed Assistant answer MUST be submitted and graded as-is even when it selects unrelated telemetry that is present inside the supplied time window. Such behavior is an agent-quality result, not infrastructure invalidation.
+- After each terminal case, the campaign MUST durably record case status, score, verdict, concise judge rationale, final-answer provenance, judge-critique provenance, and golden-telemetry audit status. A crash MUST NOT erase previously published cases, and rebuilding the report MUST be deterministic.
+- The campaign MUST maintain one concise Markdown table linking to the raw saved final answer, complete judge output, normalized trajectory, and post-run telemetry audit for every attempted case.
+- Only after Assistant and the judge finish, a trusted operator-side audit MUST use the case ground truth and exact incident window to query Splunk for evidence of the injected component, mechanism, and impact. It MUST record sanitized queries, counts, and a `confirmed`, `partial`, `missing`, or `not_checked` result without changing the agent score.
+- The first execution batch MUST contain the first ten registered Lite cases, one sequential attempt each. The remaining eleven are a later batch.
+
 ## Non-Goals
 
 - Mitigation or mutation of the benchmark environment by Assistant v3.
@@ -115,6 +124,7 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - Concurrent multi-org or multi-provider campaigns, a hosted evaluation service, dashboard UI, or automated leaderboard publication.
 - Broad refactoring of SRE Gym's runner, telemetry stack, artifact system, or existing agent clients.
 - Committing, copying, or managing users' long-lived Splunk or Assistant credentials.
+- Using the post-run golden-telemetry audit to modify, excuse, rescore, or retry a completed agent diagnosis.
 
 ## Acceptance Criteria
 
@@ -137,6 +147,8 @@ Enable an operator to run Cisco Assistant v3 as a diagnosis agent against SREGym
 - [ ] Given the proposed change set, when traceability is reviewed, then every production change maps to an approved requirement and test, and no implementation outside the approved scope is present.
 - [ ] Given non-overlapping current and older SRE Gym telemetry in one Splunk org, when an attempt runs, then the Assistant receives only the current incident's start and end timestamps, and an explicit query outside that window is preserved but rejected before grading.
 - [ ] Given the ten-case pilot command, when it completes or is resumed, then it contains exactly the first ten registered Lite cases, one sequential attempt per case, and a report that separates valid scores from infrastructure or scope failures.
+- [ ] Given a crash after any completed case, when the batch is resumed or its report is rebuilt, then every prior final answer, judge critique, score, trajectory, and telemetry-audit result remains available and no completed case is duplicated.
+- [ ] Given a completed diagnosis, when the trusted post-run audit executes, then its root-cause-aware Splunk queries occur after grading, are saved with the exact window and sanitized evidence, and do not alter the original score or Assistant artifacts.
 
 ## Assumptions
 

@@ -373,12 +373,18 @@ def test_successful_assistant_attempt_configures_agent_and_finalizes_artifacts(m
     write_config = Mock()
     write_failure = Mock()
     finalize = Mock()
+    published_run = tmp_path / "results" / "batch" / "assistant_v3" / "problem" / "run_1"
+    published_run.mkdir(parents=True)
+    run.finalize_and_publish.return_value = published_run
+    checkpoint = Mock()
     monkeypatch.setattr(benchmark_main, "_write_assistant_driver_config", write_config)
     monkeypatch.setattr(benchmark_main, "_assistant_runtime_environment", lambda: {"ASSISTANT": "configured"})
     monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=object()))
     monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
     monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", write_failure)
     monkeypatch.setattr(benchmark_main, "finalize_attempt_artifacts", finalize)
+    monkeypatch.setattr(benchmark_main.trace_postprocess, "write_trajectory", Mock(return_value=None))
+    monkeypatch.setattr(benchmark_main, "checkpoint_assistant_attempt", checkpoint, raising=False)
     monkeypatch.setattr(benchmark_main.AssistantV3Config, "from_env", Mock(return_value=object()))
     provider = SimpleNamespace(name="splunk")
 
@@ -397,6 +403,8 @@ def test_successful_assistant_attempt_configures_agent_and_finalizes_artifacts(m
     row = results[0]["assistant_v3"][0]
     assert row["observability_provider"] == "splunk"
     assert row["comparable"] is True
+    checkpoint.assert_called_once()
+    assert checkpoint.call_args.args[1] == published_run
 
 
 def test_benchmark_closes_provider_after_suite_api_shutdown(monkeypatch):

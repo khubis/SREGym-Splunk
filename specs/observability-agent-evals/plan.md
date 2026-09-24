@@ -64,6 +64,12 @@ Reuse the existing opaque run identity only for harness-level delivery verificat
 
 After Assistant completes and before `/submit`, scan recorded tool calls for explicit absolute timestamps outside that window. Reject such attempts as `telemetry_scope_violation`, preserve their artifacts, and exclude them from diagnosis scoring. Do not reject foreign run identifiers in tool output. Then run the first ten entries of `SREGYM_LITE_PROBLEMS` once each, sequentially, using the existing resume and reporting paths (R10).
 
+### 8. Persist batch progress and verify golden telemetry after grading
+
+After every terminal attempt, append one fsynced JSONL progress record and atomically regenerate a concise Markdown scorecard from published artifacts. Each row contains status, score, verdict/rationale, golden-telemetry status, and relative links to the raw final answer, full judge result, trajectory, and audit. Startup/resume rebuilds the same files, ignoring only a truncated final JSONL line, so a crash cannot erase earlier cases (R11).
+
+After the answer is graded, a trusted operator-side verifier reads the problem oracle and incident window, runs narrow Splunk queries for the injected component/mechanism/impact, and saves only sanitized queries, counts, timestamps, and a `confirmed|partial|missing|not_checked` conclusion. This audit never runs before grading, never enters the Assistant prompt/session, and never changes the score. The ten local cases run sequentially under the svelte profile and remain explicitly non-comparable; full-profile comparison runs require a larger host (R1, R11).
+
 ## System Boundaries
 
 - `[runner]` SRE Gym CLI, attempt lifecycle, model/judge validation, artifact publication.
@@ -130,6 +136,7 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 8. Provider performs the closing signal check, records collector counter deltas, waits boundedly for queue drain, and writes the delivery report. Existing cleanup then runs without retrying the agent.
 9. Artifact publication canonicalizes the opaque ID. A failed delivery audit preserves Assistant/judge evidence but excludes the attempt from diagnosis-rate aggregation.
 10. ATIF conversion and deterministic metrics run atomically; SQLite ingestion and current result browsing continue unchanged.
+11. The runner checkpoints campaign progress and scorecard, then performs and records the post-grade golden-telemetry audit before advancing to the next case.
 
 ## Test and Requirement Traceability
 

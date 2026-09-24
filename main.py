@@ -42,6 +42,7 @@ from sregym.observability.base import AttemptContext, ObservabilityProvider, Pro
 from sregym.phases import read_ledger as read_phase_ledger
 from sregym.phases import results_columns as phase_results_columns
 from sregym.profile import PROFILES, get_profile, set_profile
+from sregym.results.assistant_v3_campaign import checkpoint_attempt as checkpoint_assistant_attempt
 from sregym.results.resume import complete_resume_rows
 from sregym.run_artifacts import ArtifactFinalizationError, RunArtifacts
 from sregym.service.container_runner import ContainerRunner, ExecInput, get_container_host_bind_address
@@ -974,6 +975,9 @@ def driver_loop(
                             logger.warning(f"⚠️ ATIF trajectory DB ingest failed: {exc}")
                     else:
                         logger.warning(f"⚠️ ATIF trajectory conversion skipped for {published_run_dir}")
+                    if agent_to_run == "assistant_v3":
+                        scorecard_path = checkpoint_assistant_attempt(base_dir, published_run_dir)
+                        logger.info(f"📊 Assistant v3 campaign scorecard updated at {scorecard_path}")
 
                 if attempt == attempts_to_run[-1] or abort_campaign_after_attempt:
                     os.replace(tmp_path, final_csv_path)
