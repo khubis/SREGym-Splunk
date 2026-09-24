@@ -60,10 +60,10 @@ _DEFAULT_VALUES_PATH = Path(__file__).parents[1] / "observer" / "splunk" / "valu
 class ReliabilityPolicy:
     """Bounded polling controls shared by readiness and delivery assurance."""
 
-    readiness_timeout_seconds: float = 180.0
+    readiness_timeout_seconds: float = 360.0
     drain_timeout_seconds: float = 60.0
     request_timeout_seconds: float = 10.0
-    max_attempts: int = 12
+    max_attempts: int = 40
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 10.0
     retry_after_cap_seconds: float = 15.0

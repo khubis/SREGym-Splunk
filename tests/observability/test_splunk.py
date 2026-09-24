@@ -1139,6 +1139,13 @@ def test_reliability_policy_rejects_invalid_bounds(overrides, message):
         reliability_policy(**overrides)
 
 
+def test_default_reliability_policy_covers_observed_apm_visibility_lag():
+    policy = ReliabilityPolicy()
+
+    assert policy.readiness_timeout_seconds >= 300.0
+    assert policy.max_attempts >= 36
+
+
 def test_http_backend_reads_collector_counters_and_preserves_missing_values():
     labels = {
         "sent_metrics": 5,

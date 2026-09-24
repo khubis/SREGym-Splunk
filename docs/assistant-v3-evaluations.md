@@ -52,7 +52,7 @@ uv run python -c 'from sregym.observability import create_provider; p = create_p
 JUDGE_MODEL_ID="$JUDGE_MODEL" uv run python -c 'from main import run_judge_preflight_check; run_judge_preflight_check()'
 ```
 
-These checks validate access but do not prove telemetry delivery. Each real attempt separately verifies four-signal readiness after fault injection and performs a closing delivery audit before teardown.
+These checks validate access but do not prove telemetry delivery. Each real attempt separately verifies four-signal readiness after fault injection and performs a closing delivery audit before teardown. The opening gate allows up to six minutes for the slower APM indexing path while retaining bounded retries; Assistant does not start unless all four signals are queryable.
 
 ## Run one comparable case
 
