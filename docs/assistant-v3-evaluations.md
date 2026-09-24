@@ -265,7 +265,7 @@ For a comparable valid attempt, verify all of the following:
 - a plausible non-negative first-visible lag for every signal; and
 - a populated `Diagnosis.success`/judge result in the per-attempt CSV.
 
-`first_visible_lag_ms` measures bounded source-to-query visibility, not total incident age. The failure deltas and queue evidence demonstrate bounded collector delivery; they do not claim record-for-record completeness. A `null` required counter is unavailable evidence, not zero, and makes delivery invalid.
+`first_visible_lag_ms` measures bounded source-to-query visibility, not total incident age. The failure deltas and queue evidence demonstrate bounded collector delivery; they do not claim record-for-record completeness. OpenTelemetry Collector failure counters are sparse before their first failure, so an absent failure series is normalized to its initial zero only when the same successful snapshot contains the matching sent and queue series. Otherwise a `null` required counter is unavailable evidence and makes delivery invalid.
 
 ## Failure recovery
 

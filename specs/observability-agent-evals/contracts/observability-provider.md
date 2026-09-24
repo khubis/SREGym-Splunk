@@ -135,7 +135,7 @@ Readiness proves that each signal traversed the complete source-to-query path be
 - Snapshot cumulative collector metrics at opening and closing and report deltas for sent, send-failed, and enqueue-failed records, points, or spans.
 - Sample queue size during the attempt to retain a high-water mark, then poll until all applicable exporter queues reach zero or the drain deadline expires.
 - Compute first-visible lag from `attempt_started_at` to the first successful query for each signal.
-- Set `valid=true` only when opening and closing readiness succeed, failure deltas are zero, and queues drain. An unavailable required counter is `null` and makes the report invalid rather than being inferred as zero.
+- Set `valid=true` only when opening and closing readiness succeed, failure deltas are zero, and queues drain. Collector failure counters are sparse and do not create a series before the first failure; a missing failure series is normalized to its initial value of zero only when the same successful snapshot contains both matching sent and queue series. Without both companion series, the counter is unavailable (`null`) and makes the report invalid.
 
 This is evidence of reliable bounded delivery, not a claim that every possible source record was captured. No source payload is copied into the report.
 

@@ -272,11 +272,26 @@ class SplunkHttpBackend:
                 "kubernetes_events": _optional_int(values.get(f"{prefix}_logs")),
             }
 
+        sent = group("sent")
+        queue_size = group("queue")
+
+        def failure_group(prefix: str) -> dict[SignalName, int | None]:
+            counters = group(prefix)
+            # Collector failure counters are sparse: a series is not created
+            # until its first failure. A successful query plus the matching
+            # sent and queue series proves the exporter is observable, so the
+            # absent failure series has its documented initial value of zero.
+            # Without both companion series it remains unavailable.
+            return {
+                signal: 0 if value is None and sent[signal] is not None and queue_size[signal] is not None else value
+                for signal, value in counters.items()
+            }
+
         return CollectorSnapshot(
-            sent=group("sent"),
-            send_failed=group("failed"),
-            enqueue_failed=group("enqueue"),
-            queue_size=group("queue"),
+            sent=sent,
+            send_failed=failure_group("failed"),
+            enqueue_failed=failure_group("enqueue"),
+            queue_size=queue_size,
         )
 
     def close(self) -> None:

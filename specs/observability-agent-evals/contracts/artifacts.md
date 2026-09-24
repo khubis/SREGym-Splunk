@@ -106,7 +106,7 @@ No token, raw Authorization header, HEC endpoint query string, telemetry payload
 
 ## `observability/delivery.json`
 
-Contains the serialized `DeliveryReport` from `contracts/observability-provider.md`: opening and closing four-signal readiness, first-visible lag, collector sent/send-failed/enqueue-failed deltas, queue high-water/final sizes, drain status, and overall validity. Missing required counters are `null`, never zero. It contains counts and safe identifiers only, not signal payloads.
+Contains the serialized `DeliveryReport` from `contracts/observability-provider.md`: opening and closing four-signal readiness, first-visible lag, collector sent/send-failed/enqueue-failed deltas, queue high-water/final sizes, drain status, and overall validity. Missing required counters are `null`; the only exception is a documented sparse Collector failure counter whose absent series has an initial value of zero and whose matching sent and queue series are both present in the same successful snapshot. It contains counts and safe identifiers only, not signal payloads.
 
 An invalid post-execution delivery report changes the attempt classification to `infrastructure_invalid` and sets `included_in_diagnosis_pass_rate: false`; it does not remove the Assistant stream, diagnosis, or judge result.
 

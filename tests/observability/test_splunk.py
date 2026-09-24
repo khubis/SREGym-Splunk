@@ -1146,7 +1146,7 @@ def test_default_reliability_policy_covers_observed_apm_visibility_lag():
     assert policy.max_attempts >= 36
 
 
-def test_http_backend_reads_collector_counters_and_preserves_missing_values():
+def test_http_backend_reads_collector_counters_and_normalizes_sparse_zero_failure_series():
     labels = {
         "sent_metrics": 5,
         "sent_traces": 4,
@@ -1189,10 +1189,49 @@ def test_http_backend_reads_collector_counters_and_preserves_missing_values():
     assert result.enqueue_failed == {
         "metrics": 0,
         "traces": 0,
+        "logs": 0,
+        "kubernetes_events": 0,
+    }
+    assert result.queue_size == {"metrics": 2, "traces": 1, "logs": 0, "kubernetes_events": 0}
+
+
+def test_http_backend_keeps_sparse_failure_counter_unknown_without_companion_evidence():
+    labels = {
+        "sent_metrics": 5,
+        "queue_metrics": 0,
+        "sent_traces": 4,
+        "queue_traces": 0,
+        "sent_logs": 3,
+    }
+    lines: list[str] = []
+    for position, (label, value) in enumerate(labels.items()):
+        lines.extend(
+            (
+                "event: metadata",
+                f'data: {{"tsId":"{position}","properties":{{"sf_streamLabel":"{label}"}}}}',
+                "",
+                "event: data",
+                f'data: {{"data":[{{"tsId":"{position}","value":{value}}}]}}',
+                "",
+            )
+        )
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, text="\n".join(lines)))
+        ),
+    )
+
+    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=1), 2.0)
+
+    assert result.send_failed == {
+        "metrics": 0,
+        "traces": 0,
         "logs": None,
         "kubernetes_events": None,
     }
-    assert result.queue_size == {"metrics": 2, "traces": 1, "logs": 0, "kubernetes_events": 0}
+    assert result.enqueue_failed == result.send_failed
 
 
 def test_http_backend_closes_only_its_owned_client(monkeypatch):

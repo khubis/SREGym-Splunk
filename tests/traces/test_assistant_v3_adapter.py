@@ -110,6 +110,17 @@ def test_explicit_agent_override_converts_the_native_file() -> None:
     assert trajectory.agent.name == "assistant_v3"
 
 
+def test_attempt_run_identity_is_independent_from_problem_identity(tmp_path: Path) -> None:
+    metadata = json.loads((FIXTURE / "run_metadata.json").read_text(encoding="utf-8"))
+    metadata["run_id"] = "anon_fedcba9876543210fedcba9876543210"
+    run_dir = _materialize_run(tmp_path, metadata=metadata)
+
+    trajectory = convert(run_dir / "assistant_v3" / "events.jsonl")
+
+    assert trajectory.extra is not None
+    assert trajectory.extra["assistant_v3"]["problem_id"] == metadata["problem_id"]
+
+
 def test_subagent_events_preserve_chronology_and_form_an_embedded_trajectory(tmp_path: Path) -> None:
     header = _records(FIXTURE / "assistant_v3" / "events.jsonl")[0]
     native_events = [
@@ -302,7 +313,7 @@ def test_invalid_native_artifacts_fail_schema_and_reference_validation(tmp_path:
         duplicate.update({"sequence": len(records), "offset_ms": 110.0})
         records.append(duplicate)
     elif mutation == "identity_mismatch":
-        metadata["run_id"] = "anon_ffffffffffffffffffffffffffffffff"
+        metadata["problem_id"] = "different_problem"
     else:
         records[2]["data"]["name"] = ""
     run_dir = _materialize_run(tmp_path, events=records, metadata=metadata)

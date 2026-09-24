@@ -262,7 +262,9 @@ def _conversion_inputs(path: Path) -> tuple[str, list[_NativeEvent], dict[str, A
     request = _read_object(path.with_name("request.json"), REQUEST_SCHEMA)
     terminal = _read_object(path.with_name("terminal.json"), TERMINAL_SCHEMA)
     metadata = _read_object(path.parent.parent / "run_metadata.json", METADATA_SCHEMA)
-    identities = (request.get("problem_id"), metadata.get("problem_id"), metadata.get("run_id"))
+    # The provider run id is a unique, anonymized telemetry correlation key; it
+    # is deliberately independent from the benchmark problem identity.
+    identities = (request.get("problem_id"), metadata.get("problem_id"))
     if any(identity != problem_id for identity in identities):
         raise ValueError("Assistant artifact identities do not match")
     if metadata.get("agent_name") != AGENT_NAME:
