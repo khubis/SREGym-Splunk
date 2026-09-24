@@ -118,7 +118,7 @@ def test_checkpoint_writes_durable_scorecard_with_raw_provenance(tmp_path: Path)
     text = report.read_text(encoding="utf-8")
     assert "| edge_request_filter_cpu_saturation | 1 | completed | 100.0 | True |" in text
     assert "Correctly localized frontend-proxy" in text
-    assert "assistant_v3/terminal.json" in text
+    assert "final_answer.md" in text
     assert "edge_request_filter_cpu_saturation_results.csv" in text
     assert "trajectory.json" in text
     assert "not_checked" in text
@@ -127,6 +127,7 @@ def test_checkpoint_writes_durable_scorecard_with_raw_provenance(tmp_path: Path)
     record = json.loads(ledger[0])
     assert record["answer_sha256"]
     assert record["judge_sha256"]
+    assert (run / "final_answer.md").read_text(encoding="utf-8") == FINAL_ANSWER + "\n"
 
     checkpoint_attempt(batch, run)
     assert len((batch / "assistant_v3_campaign" / "progress.jsonl").read_text().splitlines()) == 1
@@ -172,6 +173,7 @@ def test_golden_audit_requires_grading_and_records_post_grade_evidence(tmp_path:
             "query": 'search index=main "frontend-proxy" "request_filter_eval"',
             "count": 12,
             "summary": "The faulty proxy emitted request-filter evaluation records.",
+            "samples": ["request_filter_eval rule=catastrophic-regex duration=1s"],
         }
     ]
     with pytest.raises(CampaignArtifactError, match="graded result"):
@@ -182,6 +184,7 @@ def test_golden_audit_requires_grading_and_records_post_grade_evidence(tmp_path:
             status="confirmed",
             queried_at=queried_at,
             evidence=evidence,
+            access_note="Not assessed because this fixture is intentionally ungraded.",
         )
 
     batch, run = _materialize_run(tmp_path / "graded")
@@ -195,6 +198,7 @@ def test_golden_audit_requires_grading_and_records_post_grade_evidence(tmp_path:
             status="confirmed",
             queried_at=graded_at - timedelta(seconds=1),
             evidence=evidence,
+            access_note="The causal evidence is directly available in Splunk.",
         )
 
     audit_path = record_golden_telemetry_audit(
@@ -204,6 +208,7 @@ def test_golden_audit_requires_grading_and_records_post_grade_evidence(tmp_path:
         status="confirmed",
         queried_at=graded_at + timedelta(seconds=1),
         evidence=evidence,
+        access_note="The causal evidence is directly available in Splunk; Kubernetes access is not required.",
     )
 
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -213,8 +218,12 @@ def test_golden_audit_requires_grading_and_records_post_grade_evidence(tmp_path:
         "end": "2026-09-24T19:11:29.088000Z",
     }
     assert audit["expected_root_cause_sha256"]
+    assert "Kubernetes access is not required" in audit["access_note"]
     assert audit["evidence"] == evidence
     scorecard = batch / "assistant_v3_campaign" / "scorecard.md"
     scorecard_text = scorecard.read_text(encoding="utf-8")
     assert "confirmed" in scorecard_text
+    assert "faulty proxy emitted request-filter" in scorecard_text
+    assert "telemetry proof" in scorecard_text
+    assert "Kubernetes access is not required" in scorecard_text
     assert "| edge_request_filter_cpu_saturation | 1 | completed | 100.0 | True |" in scorecard_text

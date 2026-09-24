@@ -19,6 +19,7 @@ LEDGER_FILENAME = "progress.jsonl"
 SCORECARD_FILENAME = "scorecard.md"
 RESUME_FILENAME = "resume.csv"
 AUDIT_FILENAME = "golden_telemetry.json"
+FINAL_ANSWER_FILENAME = "final_answer.md"
 _AUDIT_STATUSES = frozenset({"confirmed", "partial", "missing", "not_checked"})
 _SIGNALS = frozenset({"metrics", "traces", "logs", "kubernetes_events"})
 _WINDOW_RE = re.compile(
@@ -200,10 +201,21 @@ def _relative(batch_dir: Path, path: Path | None) -> str | None:
     return os.path.relpath(path.resolve(), batch_dir.resolve()) if path is not None else None
 
 
+def _write_final_answer(run_dir: Path, answer: str | None) -> Path | None:
+    """Write one concise derived view of the validated submitted answer."""
+    path = run_dir / FINAL_ANSWER_FILENAME
+    if answer is None:
+        path.unlink(missing_ok=True)
+        return None
+    _atomic_write(path, (answer.rstrip() + "\n").encode())
+    return path
+
+
 def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
     metadata = _read_json(run_dir / "run_metadata.json")
-    answer, answer_path, sequence = _final_answer(run_dir)
+    answer, _, sequence = _final_answer(run_dir)
     judge, judge_path, result_row = _judge_result(run_dir, answer, sequence)
+    answer_path = _write_final_answer(run_dir, answer)
     audit_path = run_dir / AUDIT_FILENAME
     audit = _read_json(audit_path) if audit_path.exists() else None
     trajectory_path = run_dir / "trajectory.json"
@@ -231,6 +243,20 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
         "trajectory_path": _relative(batch_dir, trajectory_path) if trajectory_path.exists() else None,
         "audit_path": _relative(batch_dir, audit_path) if audit is not None else None,
         "audit_status": str(audit.get("status")) if audit is not None else "not_checked",
+        "audit_summary": (
+            " ".join(
+                str(item.get("summary", "")).strip()
+                for item in audit.get("evidence", [])
+                if isinstance(item, dict) and str(item.get("summary", "")).strip()
+            )
+            if audit is not None
+            else "Golden telemetry has not been checked."
+        ),
+        "access_note": (
+            str(audit.get("access_note", "")).strip()
+            if audit is not None
+            else "Not assessed because the attempt was not graded."
+        ),
         "audit_sha256": _sha256_file(audit_path) if audit is not None else None,
         "result_row": result_row,
     }
@@ -295,15 +321,15 @@ def _render_scorecard(batch_dir: Path, records: list[dict[str, Any]]) -> bytes:
         "",
         "Derived from immutable per-attempt artifacts. Golden telemetry is checked only after grading and never changes the score.",
         "",
-        "| Incident | Attempt | Status | Score | Reason | Rationale | Golden telemetry | Provenance |",
-        "|---|---:|---|---:|---|---|---|---|",
+        "| Incident | Attempt | Status | Score | Reason | Rationale | Golden telemetry | Access / ingestion note | Provenance |",
+        "|---|---:|---|---:|---|---|---|---|---|",
     ]
     for record in records:
         provenance = [
             _link(report_dir, batch_dir, record.get("answer_path"), "answer"),
             _link(report_dir, batch_dir, record.get("judge_path"), "judge"),
             _link(report_dir, batch_dir, record.get("trajectory_path"), "trace"),
-            _link(report_dir, batch_dir, record.get("audit_path"), "audit"),
+            _link(report_dir, batch_dir, record.get("audit_path"), "telemetry proof"),
         ]
         score = "—" if record.get("score") is None else f"{float(record['score']):.1f}"
         lines.append(
@@ -316,7 +342,11 @@ def _render_scorecard(batch_dir: Path, records: list[dict[str, Any]]) -> bytes:
                     score,
                     _markdown_text(record["verdict"]),
                     _markdown_text(record["rationale"], limit=220),
-                    _markdown_text(record["audit_status"]),
+                    _markdown_text(
+                        f"{record['audit_status']} — {record.get('audit_summary', '')}",
+                        limit=260,
+                    ),
+                    _markdown_text(record.get("access_note"), limit=220),
                     " · ".join(item for item in provenance if item) or "—",
                 ]
             )
@@ -401,6 +431,7 @@ def record_golden_telemetry_audit(
     status: str,
     queried_at: datetime,
     evidence: list[dict[str, Any]],
+    access_note: str,
 ) -> Path:
     """Persist a sanitized root-cause-aware audit only after diagnosis grading."""
     if status not in _AUDIT_STATUSES or status == "not_checked":
@@ -412,6 +443,10 @@ def record_golden_telemetry_audit(
     if judge is None or judge_path is None:
         raise CampaignArtifactError("golden telemetry audit requires a graded result")
     query_time = _parse_utc(queried_at)
+    if not isinstance(access_note, str) or not access_note.strip():
+        raise CampaignArtifactError("golden telemetry access note is required")
+    if any(marker in access_note.lower() for marker in _SECRET_MARKERS):
+        raise CampaignArtifactError("golden telemetry access note contains credential-like text")
     graded_at = datetime.fromtimestamp(judge_path.stat().st_mtime, tz=UTC)
     if query_time < graded_at:
         raise CampaignArtifactError("golden telemetry query must occur after grading")
@@ -421,6 +456,7 @@ def record_golden_telemetry_audit(
         query = item.get("query")
         count = item.get("count")
         summary = item.get("summary")
+        samples = item.get("samples", [])
         if (
             signal not in _SIGNALS
             or not isinstance(query, str)
@@ -430,13 +466,18 @@ def record_golden_telemetry_audit(
             or count < 0
             or not isinstance(summary, str)
             or not summary.strip()
+            or not isinstance(samples, list)
+            or any(not isinstance(sample, str) or not sample.strip() for sample in samples)
+            or len(samples) > 20
         ):
             raise CampaignArtifactError("golden telemetry evidence is invalid")
-        if any(marker in query.lower() or marker in summary.lower() for marker in _SECRET_MARKERS):
+        proof_text = " ".join([query, summary, *samples]).lower()
+        if any(marker in proof_text for marker in _SECRET_MARKERS):
             raise CampaignArtifactError("golden telemetry evidence contains credential-like text")
-        normalized_evidence.append(
-            {"signal": signal, "query": query, "count": count, "summary": summary}
-        )
+        normalized = {"signal": signal, "query": query, "count": count, "summary": summary}
+        if samples:
+            normalized["samples"] = samples
+        normalized_evidence.append(normalized)
     audit = {
         "schema": "sregym.golden_telemetry_audit.v1",
         "problem_id": _read_json(run / "run_metadata.json").get("problem_id"),
@@ -447,6 +488,7 @@ def record_golden_telemetry_audit(
         "status": status,
         "expected_root_cause": expected_root_cause,
         "expected_root_cause_sha256": _sha256_text(expected_root_cause),
+        "access_note": access_note.strip(),
         "evidence": normalized_evidence,
     }
     path = run / AUDIT_FILENAME
