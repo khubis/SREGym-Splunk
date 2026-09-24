@@ -213,13 +213,9 @@ class SplunkHttpBackend:
         timeout_seconds: float,
     ) -> int:
         if signal == "metrics":
-            namespace_filter = " or ".join(
-                f"filter('k8s.namespace.name', '{namespace}')" for namespace in scope.namespaces
-            )
             program = (
-                "data('k8s.container.cpu.utilization', filter=filter('sregym.run.id', "
-                f"'{context.run_id}') and ({namespace_filter}), rollup='count')"
-                ".count().publish(label='readiness')"
+                "data('otelcol_exporter_sent_metric_points', filter=filter('sregym.run.id', "
+                f"'{context.run_id}'), rollup='latest').max().publish(label='readiness')"
             )
             return int(
                 self._signalflow(program, context.attempt_started_at, checked_at, timeout_seconds).get("readiness", 0)
@@ -298,7 +294,10 @@ class SplunkHttpBackend:
     ) -> int:
         namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
         kind = "k8s.container.name=*" if signal == "logs" else "k8s.event.reason=*"
-        query = f'search index="{self.configuration.hec_index}" "{context.run_id}" ({namespaces}) {kind} | head 1'
+        query = (
+            f'search index="{self.configuration.hec_index}" k8s.cluster.name="{context.run_id}" '
+            f"({namespaces}) {kind} | head 1"
+        )
         job_key = (context.run_id, signal)
         job_id = self._log_jobs.get(job_key)
         if job_id is None:
@@ -363,10 +362,7 @@ class SplunkHttpBackend:
                 raise
             field = "getAnalyticsSearch"
         else:
-            tags = [
-                {"tag": "sregym.run.id", "operation": "IN", "values": [context.run_id]},
-                {"tag": "k8s.namespace.name", "operation": "IN", "values": list(scope.namespaces)},
-            ]
+            tags = [{"tag": "k8s.cluster.name", "operation": "IN", "values": [context.run_id]}]
             parameters = {
                 "sharedParameters": {
                     "timeRangeMillis": {

@@ -771,7 +771,7 @@ def test_http_backend_rejects_missing_accessible_logs_connection():
     assert raised.value.transient is False
 
 
-def test_http_backend_queries_all_four_signals_with_run_and_namespace_scope():
+def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     requests: list[tuple[str, dict | None, str]] = []
     log_jobs = iter(("log-job", "event-job"))
     sse = "\n".join(
@@ -843,12 +843,12 @@ def test_http_backend_queries_all_four_signals_with_run_and_namespace_scope():
 
     assert counts == dict.fromkeys(SIGNALS, 1) | {"metrics": 2}
     signalflow_program = next(content for operation, _, content in requests if operation == "signalflow")
-    assert RUN_ID in signalflow_program
-    assert "social-network" in signalflow_program
+    assert "otelcol_exporter_sent_metric_points" in signalflow_program
+    assert f"filter('sregym.run.id', '{RUN_ID}')" in signalflow_program
     trace_payload = next(payload for operation, payload, _ in requests if operation == "StartAnalyticsSearch")
     assert trace_payload is not None
-    assert RUN_ID in json.dumps(trace_payload)
-    assert "social-network" in json.dumps(trace_payload)
+    trace_tags = trace_payload["variables"]["parameters"]["sharedParameters"]["filters"][0]["spanFilters"][0]["tags"]
+    assert trace_tags == [{"tag": "k8s.cluster.name", "operation": "IN", "values": [RUN_ID]}]
     assert trace_payload["variables"]["parameters"]["sectionsParameters"] == [
         {"sectionType": "traceExamples", "limit": 1}
     ]
@@ -856,7 +856,7 @@ def test_http_backend_queries_all_four_signals_with_run_and_namespace_scope():
         payload for operation, payload, _ in requests if operation == "createSearchJob" and payload is not None
     ]
     log_queries = [payload["variables"]["query"] for payload in log_payloads]
-    assert all(RUN_ID in query and "social-network" in query for query in log_queries)
+    assert all(f'k8s.cluster.name="{RUN_ID}"' in query and "social-network" in query for query in log_queries)
     assert "k8s.container.name=*" in log_queries[0]
     assert "k8s.event.reason=*" in log_queries[1]
     assert all(payload["variables"]["queryType"] == "SPL1" for payload in log_payloads)
