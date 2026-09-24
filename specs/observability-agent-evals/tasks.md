@@ -177,6 +177,8 @@ Traceability is a live checklist: each row names the focused test locations that
 
 Live target note: source `/Users/khubishah/Documents/assistant/.env` and derive the run configuration only from its `SYNTHETIC_*` variables. Map `SYNTHETIC_REALM`, `SYNTHETIC_ORG_ID`, and `SYNTHETIC_USER_ID` to the Assistant runtime identity. Live preflight on 2026-09-24 verified `SYNTHETIC_SPLUNK_ACCESS_TOKEN` for both target-realm query access and OTLP ingest, so map it to `SF_TOKEN` and `SPLUNK_O11Y_INGEST_TOKEN`. `SYNTHETIC_SF_TOKEN` returned 401 for both target-realm endpoints and must not replace the verified token unless its intended role or value is corrected. Never fall back to the non-synthetic org variables for this campaign.
 
+Live N3 note (2026-09-24): the synthetic-org retry exported and queried metrics and traces successfully, but stopped before Assistant because the configured HEC input writes to `khubi_main` while the synthetic org's `o11y-ai-quality` logs connection cannot access that index. Logs and Kubernetes events therefore returned zero. Retry only after the HEC input writes to an index present in that connection, or the connection is granted access to the HEC index; do not weaken the four-signal readiness gate.
+
 ## Commit and Upstream Strategy
 
 - Commits A–F contain no `clients.assistant_v3` import and are candidates for an upstream PR in order: coverage foundation, provider lifecycle, capability declarations, OTLP fan-out, secure Splunk export, delivery verification.
