@@ -255,7 +255,11 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
         "access_note": (
             str(audit.get("access_note", "")).strip()
             if audit is not None
-            else "Not assessed because the attempt was not graded."
+            else (
+                "Pending independent post-grade verification."
+                if judge is not None
+                else "Not assessed because the attempt was not graded."
+            )
         ),
         "audit_sha256": _sha256_file(audit_path) if audit is not None else None,
         "result_row": result_row,

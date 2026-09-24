@@ -122,6 +122,7 @@ def test_checkpoint_writes_durable_scorecard_with_raw_provenance(tmp_path: Path)
     assert "edge_request_filter_cpu_saturation_results.csv" in text
     assert "trajectory.json" in text
     assert "not_checked" in text
+    assert "Pending independent post-grade verification." in text
     ledger = (batch / "assistant_v3_campaign" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(ledger) == 1
     record = json.loads(ledger[0])
@@ -131,6 +132,16 @@ def test_checkpoint_writes_durable_scorecard_with_raw_provenance(tmp_path: Path)
 
     checkpoint_attempt(batch, run)
     assert len((batch / "assistant_v3_campaign" / "progress.jsonl").read_text().splitlines()) == 1
+
+
+def test_ungraded_attempt_explains_why_access_was_not_assessed(tmp_path: Path) -> None:
+    batch, run = _materialize_run(tmp_path, graded=False)
+
+    report = checkpoint_attempt(batch, run)
+
+    text = report.read_text(encoding="utf-8")
+    assert "Not assessed because the attempt was not graded." in text
+    assert "Pending independent post-grade verification." not in text
 
 
 def test_checkpoint_rejects_a_judged_submission_that_differs_from_completion(tmp_path: Path) -> None:
