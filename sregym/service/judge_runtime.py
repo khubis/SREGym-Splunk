@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from sregym.agent_registry import get_agent
-from sregym.service.container_runner import ContainerConfig, ContainerRunner, ExecInput
+from sregym.service.container_runner import LOCAL_AGENT_IMAGE, ContainerConfig, ContainerRunner, ExecInput
 from sregym.service.internet_policy import InternetPolicy
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,15 @@ def managed_judge_backend(backend: str = "api", *, force_build: bool = False) ->
         return
     if backend not in JUDGE_BACKENDS:
         raise ValueError(f"Unknown judge backend: {backend}")
+    reuse_bridge = os.environ.get("SREGYM_REUSE_JUDGE_BRIDGE", "").strip().lower() in {"1", "true", "yes"}
+    if reuse_bridge:
+        if not os.environ.get("SREGYM_JUDGE_BRIDGE_URL"):
+            raise ValueError("SREGYM_REUSE_JUDGE_BRIDGE requires SREGYM_JUDGE_BRIDGE_URL")
+        if force_build:
+            raise ValueError("Build the local agent image before reusing an external judge bridge")
+        logger.info("Using the preflighted external %s judge bridge", backend)
+        yield LOCAL_AGENT_IMAGE
+        return
 
     env = _subscription_environment(backend)
     repo_root = Path(__file__).resolve().parents[2]

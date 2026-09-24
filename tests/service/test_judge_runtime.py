@@ -88,6 +88,35 @@ def test_api_mode_preserves_manual_endpoint_without_starting_container(docker):
     runtime.subprocess.Popen.assert_not_called()
 
 
+def test_cli_mode_can_reuse_an_explicit_healthy_bridge(docker, monkeypatch):
+    monkeypatch.setenv("SREGYM_JUDGE_BRIDGE_URL", "http://127.0.0.1:4101/v1")
+    monkeypatch.setenv("SREGYM_REUSE_JUDGE_BRIDGE", "true")
+
+    with runtime.managed_judge_backend("codex", force_build=False) as image:
+        assert image == LOCAL_AGENT_IMAGE
+        assert os.environ["SREGYM_JUDGE_BRIDGE_URL"] == "http://127.0.0.1:4101/v1"
+
+    runtime.subprocess.Popen.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("bridge_url", "force_build", "message"),
+    [
+        (None, False, "requires SREGYM_JUDGE_BRIDGE_URL"),
+        ("http://127.0.0.1:4101/v1", True, "Build the local agent image"),
+    ],
+)
+def test_reused_cli_bridge_rejects_incomplete_setup(docker, monkeypatch, bridge_url, force_build, message):
+    monkeypatch.setenv("SREGYM_REUSE_JUDGE_BRIDGE", "true")
+    if bridge_url:
+        monkeypatch.setenv("SREGYM_JUDGE_BRIDGE_URL", bridge_url)
+
+    with pytest.raises(ValueError, match=message), runtime.managed_judge_backend("codex", force_build=force_build):
+        pytest.fail("invalid external bridge setup must not start a benchmark")
+
+    runtime.subprocess.Popen.assert_not_called()
+
+
 @pytest.mark.parametrize("backend", ["api", "cursor"])
 @pytest.mark.parametrize("external", [False, True])
 def test_main_selects_backend_and_skips_it_for_external_harness(docker, monkeypatch, backend, external):
