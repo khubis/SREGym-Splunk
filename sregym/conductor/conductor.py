@@ -1592,7 +1592,10 @@ class Conductor:
 
         if not is_train_ticket:
             for ns in app_namespaces:
-                self.jaeger.create_external_name_service(ns)
+                self.jaeger.create_external_name_service(ns, restart_deployments=True)
+                # The restart forces long-lived Jaeger/OTel clients to resolve
+                # the new ExternalName destination before workload traffic starts.
+                self.kubectl.wait_for_ready(ns)
 
         if problem.run_default_workload:
             problem.app.start_workload()

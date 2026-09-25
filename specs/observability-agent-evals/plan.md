@@ -118,11 +118,13 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 - `sregym/agent_registry.py`, `sregym/agent_launcher.py` `[runner]` — backward-compatible direct-Kubernetes/MCP capability flags and enforcement.
 - `sregym/conductor/conductor.py` `[runner/infra]` — invoke provider preparation at the safe pre-deploy seam.
 - `sregym/observer/otel_collector/otel_collector.py` and `otel-collector.yaml` `[infra/reusable]` — optional OTLP trace fan-out; disabled output remains unchanged.
+- `sregym/observer/jaeger/jaeger.py` `[infra/reusable]` — replace app-local Jaeger endpoints and restart only trace-emitting Deployments before workload traffic so clients resolve the centralized collector reliably without disrupting databases, caches, or service discovery.
 - `sregym/run_artifacts.py` `[runner]` — validated preallocated opaque identity.
 - `sregym/service/container_runner.py` `[runner]` — enforce per-agent Kubernetes/MCP exposure and allowlist only required Assistant variables; continue stripping judge credentials.
 - `atif_converter/adapters/__init__.py`, `atif_converter/converter.py`, `sregym/traces/convert.py` `[traces]` — register Assistant detection/dispatch.
 - `pyproject.toml`, `uv.lock` `[tests]` — dev-only coverage tooling and package discovery for the new modules.
 - Existing focused test files may receive regression cases where that is clearer than creating another file; no unrelated production module is in scope.
+- `tests/observer/test_jaeger.py` may be added for the redirect/restart contract; `tests/test_infrastructure_reuse.py` may receive the corresponding Conductor ordering regression.
 
 ## Data Flow
 

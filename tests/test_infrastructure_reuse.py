@@ -183,6 +183,53 @@ def test_observer_setup_forwards_only_configured_external_export(startup, extern
         startup.otel_collector.deploy.assert_called_once_with(external_export)
 
 
+def test_application_trace_redirect_is_ready_before_workload_starts(conductor, monkeypatch):
+    events = []
+    app = SimpleNamespace(
+        name="Hotel Reservation",
+        namespace="hotel-reservation",
+        deploy=lambda: events.append("app-deploy"),
+        start_workload=lambda: events.append("workload-start"),
+    )
+    conductor.problem = SimpleNamespace(
+        app=app,
+        requires_khaos=lambda: False,
+        run_default_workload=True,
+    )
+    conductor._baseline_captured = True
+    conductor.config = SimpleNamespace(deploy_loki=True)
+    conductor._metrics_server_configured = MagicMock(return_value=True)
+    conductor._openebs_ready = MagicMock(return_value=True)
+    conductor._wait_for_infrastructure_ready = MagicMock()
+    conductor._ensure_openebs_device_storageclass = MagicMock()
+    conductor.prometheus = MagicMock()
+    conductor.jaeger = MagicMock()
+    conductor.jaeger.create_external_name_service.side_effect = (
+        lambda namespace, **kwargs: events.append(("trace-redirect", namespace, kwargs))
+    )
+    conductor.otel_collector = MagicMock()
+    conductor.loki = MagicMock()
+    conductor.mcp_server = MagicMock()
+    conductor.kubectl.wait_for_ready.side_effect = lambda namespace: events.append(("ready", namespace))
+    monkeypatch.setattr(conductor_module, "is_svelte", lambda: False)
+
+    conductor.deploy_app()
+
+    app_events = [
+        event
+        for event in events
+        if event == "app-deploy"
+        or event == "workload-start"
+        or (isinstance(event, tuple) and event[1] == "hotel-reservation")
+    ]
+    assert app_events == [
+        "app-deploy",
+        ("trace-redirect", "hotel-reservation", {"restart_deployments": True}),
+        ("ready", "hotel-reservation"),
+        "workload-start",
+    ]
+
+
 @pytest.mark.parametrize(
     "check,name", [("_metrics_server_configured", "metrics-server"), ("_openebs_ready", "OpenEBS")]
 )

@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 import time
@@ -7,6 +8,8 @@ logger = logging.getLogger("all.sregym.jaeger")
 
 
 class Jaeger:
+    _TRACING_MARKERS = ("JAEGER", "OTEL_", "OPENTELEMETRY")
+
     def __init__(self):
         self.namespace = "observe"
         base_dir = Path(__file__).parent
@@ -61,16 +64,26 @@ class Jaeger:
                 time.sleep(3)
         raise RuntimeError(f"Service {service} not found within {timeout}s")
 
-    def create_external_name_service(self, namespace: str):
+    def create_external_name_service(self, namespace: str, *, restart_deployments: bool = False):
         """Replace all app-local Jaeger deployments and services with ExternalName
         services that redirect traffic to the centralized Jaeger in the observe namespace.
 
         This ensures traces flow to the shared observability stack regardless of
         whether the app uses the Jaeger agent protocol (port 6831) or OTLP (port 4317).
+        Applications redirected after deployment must restart before traffic begins;
+        Jaeger clients can otherwise retain the removed Service's resolved address.
         """
-        # Delete any app-local Jaeger deployments/statefulsets
+        # Delete app-local Jaeger workloads across the labels and conventional
+        # names used by the benchmark applications.
         for resource in ["deployment", "statefulset"]:
-            self.run_cmd(f"kubectl delete {resource} -n {namespace} -l app-name=jaeger --ignore-not-found")
+            for selector in ("app-name=jaeger", "app=jaeger", "io.kompose.service=jaeger"):
+                self.run_cmd(
+                    f"kubectl delete {resource} -n {namespace} -l {selector} --ignore-not-found"
+                )
+            self.run_cmd(
+                f"kubectl delete {resource} -n {namespace} "
+                "jaeger jaeger-agent jaeger-collector jaeger-query --ignore-not-found"
+            )
 
         # All jaeger service names that apps might reference.
         # Route through OTel Collector so traces are converted to span metrics.
@@ -83,6 +96,23 @@ class Jaeger:
                 f"kubectl create service externalname {svc_name} -n {namespace} --external-name {external_name}"
             )
             logger.info(f"Created ExternalName service '{svc_name}' in namespace '{namespace}' -> {external_name}")
+
+        if restart_deployments:
+            deployments = json.loads(self.run_cmd(f"kubectl -n {namespace} get deployment -o json"))
+            tracing_deployments = []
+            for deployment in deployments.get("items", []):
+                pod_template = deployment.get("spec", {}).get("template", {})
+                serialized_template = json.dumps(pod_template).upper()
+                if any(marker in serialized_template for marker in self._TRACING_MARKERS):
+                    tracing_deployments.append(deployment["metadata"]["name"])
+
+            for deployment_name in tracing_deployments:
+                self.run_cmd(f"kubectl rollout restart deployment/{deployment_name} -n {namespace}")
+            logger.info(
+                "Restarted trace-emitting Deployments in namespace '%s' after Jaeger redirect: %s",
+                namespace,
+                ", ".join(tracing_deployments) or "none",
+            )
 
         # Restart any OTel collector DaemonSets in the namespace so they
         # re-resolve DNS and connect to the central collector instead of the
