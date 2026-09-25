@@ -75,6 +75,35 @@ uv run main.py \
 
 The other planned acceptance case, `readiness_probe_misconfiguration_social_network`, uses the same command shape and exercises Kubernetes readiness/events more directly. Do not change its prompt or add a service/time hint.
 
+### Pause one live attempt for operator inspection
+
+For an auditable walkthrough, add `--inspect-before-agent` to a single-problem
+command running in an interactive terminal. The runner injects the fault, waits
+until metrics, traces, logs, and Kubernetes events are queryable in Splunk, then
+prints the opaque run identity and pauses before creating the Assistant session.
+The application, fault, workload, and exporters remain active while paused.
+
+Inspect the live Kind cluster and the exact Splunk time/run scope, then press
+Enter in the benchmark terminal. The same attempt continues through Assistant
+V3, grading, delivery audit, artifact publication, and cleanup. This option is
+rejected for suites, external-harness mode, and non-interactive terminals.
+
+```bash
+uv run main.py \
+  --problem cronjob_sidecar_blocks_completion_hotel_reservation \
+  --stages diagnosis \
+  --profile full \
+  --agent assistant_v3 \
+  --model gpt-5.6-luna \
+  --reasoning-effort medium \
+  --judge-model "$JUDGE_MODEL" \
+  --judge-backend api \
+  --observability-provider splunk \
+  --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --inspect-before-agent \
+  --force-build
+```
+
 ## Run a non-comparable svelte smoke
 
 Use this only to validate wiring with fewer resources:

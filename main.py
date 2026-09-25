@@ -105,6 +105,8 @@ def validate_assistant_campaign(args) -> None:
         raise ValueError("Assistant v3 requires an explicit judge backend")
     if args.observability_provider != "splunk":
         raise ValueError("Assistant v3 benchmark runs require the Splunk observability provider")
+    if getattr(args, "inspect_before_agent", False) and args.suite is not None:
+        raise ValueError("Assistant v3 inspection runs require one explicit --problem")
 
 
 def run_preflight_check(
@@ -191,6 +193,18 @@ def _restore_env_var(name: str, previous_value: str | None) -> None:
         os.environ.pop(name, None)
     else:
         os.environ[name] = previous_value
+
+
+async def _wait_for_operator_inspection(*, problem_id: str, namespace: str, run_id: str) -> None:
+    """Pause a live attempt after telemetry readiness and before agent launch."""
+    console.log("\n🔎 Inspection gate reached; the fault and telemetry exporters remain active.")
+    console.log(f"   Problem: {problem_id}")
+    console.log(f"   Namespace: {namespace}")
+    console.log(f"   Run/cluster scope: {run_id}")
+    try:
+        await asyncio.to_thread(input, "Press Enter to launch the agent and continue this same attempt... ")
+    except EOFError as exc:
+        raise RuntimeError("--inspect-before-agent requires an interactive terminal") from exc
 
 
 def _env_status(name: str) -> str:
@@ -362,6 +376,7 @@ def driver_loop(
     resume_csv: str | None = None,
     judge_backend: str = "api",
     observability_provider: ObservabilityProvider | None = None,
+    inspect_before_agent: bool = False,
 ):
     """
     Deploy each problem and wait for HTTP grading via POST /submit.
@@ -374,6 +389,7 @@ def driver_loop(
         use_external_harness: If True, inject fault and exit without running evaluation logic.
         n_attempts: Number of end-to-end attempts to run each problem.
         resume_csv: Path to a previous results CSV to resume from (skip completed problems).
+        inspect_before_agent: Pause after telemetry readiness and before starting the agent.
     """
 
     async def driver():
@@ -695,6 +711,12 @@ def driver_loop(
                         problem_id=pid,
                         agent=agent_to_run,
                         attempt=attempt,
+                    )
+                if inspect_before_agent:
+                    await _wait_for_operator_inspection(
+                        problem_id=pid,
+                        namespace=conductor.app.namespace,
+                        run_id=run.artifact_id,
                     )
                 agent_proc = None
                 conductor.agent_timeout_seconds = agent_timeout
@@ -1037,6 +1059,7 @@ def _run_driver_and_shutdown(
     resume_csv: str | None = None,
     judge_backend: str = "api",
     observability_provider: ObservabilityProvider | None = None,
+    inspect_before_agent: bool = False,
 ):
     """Run the benchmark driver, stash results, then tell the API to exit."""
     global _driver_error, _driver_results
@@ -1051,6 +1074,7 @@ def _run_driver_and_shutdown(
             resume_csv=resume_csv,
             judge_backend=judge_backend,
             observability_provider=observability_provider,
+            inspect_before_agent=inspect_before_agent,
         )
         _driver_results = results
     except BenchmarkCampaignAborted as exc:
@@ -1198,7 +1222,11 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
             args.resume,
         ),
         name="driver",
-        kwargs={"judge_backend": judge_backend, "observability_provider": observability_provider},
+        kwargs={
+            "judge_backend": judge_backend,
+            "observability_provider": observability_provider,
+            "inspect_before_agent": getattr(args, "inspect_before_agent", False),
+        },
         daemon=True,
     )
     driver_thread.start()
@@ -1401,6 +1429,14 @@ if __name__ == "__main__":
         help="Agent timeout in seconds after deployment (default: 1800)",
     )
     parser.add_argument(
+        "--inspect-before-agent",
+        action="store_true",
+        help=(
+            "After fault injection and observability readiness, pause this single-problem run "
+            "for live Kubernetes and Splunk inspection until Enter is pressed."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -1430,5 +1466,11 @@ if __name__ == "__main__":
         parser.error("--propagation must be a non-negative integer")
     if args.use_external_harness and args.suite:
         parser.error("--use-external-harness cannot be used with --suite; use --problem instead")
+    if args.inspect_before_agent and args.problem is None:
+        parser.error("--inspect-before-agent requires one explicit --problem")
+    if args.inspect_before_agent and args.use_external_harness:
+        parser.error("--inspect-before-agent cannot be combined with --use-external-harness")
+    if args.inspect_before_agent and not sys.stdin.isatty():
+        parser.error("--inspect-before-agent requires an interactive terminal")
 
     main(args)

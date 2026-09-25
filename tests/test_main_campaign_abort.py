@@ -414,6 +414,41 @@ def test_successful_assistant_attempt_configures_agent_and_finalizes_artifacts(m
     assert checkpoint.call_args.args[1] == published_run
 
 
+def test_inspection_gate_waits_after_readiness_before_starting_assistant(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    conductor = _driver_conductor(start_result=benchmark_main.StartProblemResult.SUCCESS)
+    run = _fake_run(tmp_path)
+    launcher = _configure_driver_test(benchmark_main, monkeypatch, tmp_path, conductor, run)
+    registration = SimpleNamespace(agent_version="v3", kickoff_env={})
+    monkeypatch.setattr(benchmark_main, "get_agent", Mock(return_value=registration))
+    monkeypatch.setattr(benchmark_main, "_write_assistant_driver_config", Mock())
+    monkeypatch.setattr(benchmark_main, "_assistant_runtime_environment", lambda: {})
+    monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=object()))
+    monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
+    monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", Mock())
+    monkeypatch.setattr(benchmark_main, "finalize_attempt_artifacts", Mock())
+    monkeypatch.setattr(benchmark_main.trace_postprocess, "write_trajectory", Mock(return_value=None))
+    monkeypatch.setattr(benchmark_main, "checkpoint_assistant_attempt", Mock(), raising=False)
+    monkeypatch.setattr(benchmark_main.AssistantV3Config, "from_env", Mock(return_value=object()))
+    gate = AsyncMock()
+    monkeypatch.setattr(benchmark_main, "_wait_for_operator_inspection", gate)
+
+    benchmark_main.driver_loop(
+        conductor,
+        problem_selection=["problem"],
+        agent_to_run="assistant_v3",
+        observability_provider=SimpleNamespace(name="splunk"),
+        inspect_before_agent=True,
+    )
+
+    gate.assert_awaited_once_with(
+        problem_id="problem",
+        namespace="otel-demo",
+        run_id=run.artifact_id,
+    )
+    launcher.ensure_started.assert_awaited_once_with(registration)
+
+
 def test_benchmark_closes_provider_after_suite_api_shutdown(monkeypatch):
     benchmark_main = _load_main_module()
     provider = MagicMock(name="provider", name_for_error="splunk")
@@ -464,7 +499,9 @@ def test_cli_help_builds_the_observability_provider_option(monkeypatch, capsys):
     with pytest.raises(SystemExit) as raised:
         runpy.run_path(str(main_path), run_name="__main__")
     assert raised.value.code == 0
-    assert "--observability-provider {none,splunk}" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "--observability-provider {none,splunk}" in output
+    assert "--inspect-before-agent" in output
 
 
 @pytest.mark.parametrize("platform_failure, expected_attempts", [(True, 1), (False, 3)])
