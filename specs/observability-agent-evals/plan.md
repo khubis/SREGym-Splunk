@@ -14,10 +14,11 @@ Each attempt receives a cryptographically random `anon_<32 hex>` identity before
 
 The Splunk provider installs the official Splunk OpenTelemetry Collector Helm chart, pinned to `0.160.0` for reproducibility. Version `0.161.0` is intentionally not the v1 pin because it introduced Kubernetes semantic-convention breaking changes one day before this plan was written. Upgrades are separate reviewed changes.
 
-The collector chart supplies Kubernetes metrics, container logs, and Kubernetes events. A generic optional fan-out in SRE Gym's existing central OTel collector preserves Jaeger and Prometheus while additionally:
+The collector chart supplies Kubernetes metrics, container logs, and Kubernetes events. SRE Gym's existing Prometheus remains the authoritative application-metric scraper. The Splunk gateway performs one bounded application-only scrape of Prometheus's `/federate` endpoint rather than rediscovering or individually configuring application endpoints. Federation selects application-target series from the existing Prometheus catalog, excludes Kubernetes/infrastructure scrape jobs already covered by the chart, and adds the opaque run resource attributes plus a source marker. It must not use a hand-maintained metric-name allowlist, forward the unfiltered Prometheus catalog, or create a second Kubernetes-metrics path.
 
-- exporting the existing application traces over OTLP to the Splunk gateway; and
-- exporting application traces over OTLP. The v1 fan-out deliberately does not federate every central Prometheus series; the provider collector supplies Kubernetes metrics without an unbounded duplicate metrics stream.
+A generic optional fan-out in SRE Gym's existing central OTel collector preserves Jaeger and Prometheus while additionally exporting the existing application traces over OTLP to the Splunk gateway.
+
+Metric readiness requires both a run-scoped Kubernetes metric from the chart and the standardized `probe_success` sentinel for the active application namespace, marked as originating from SRE Gym Prometheus. This verifies the actual source-to-Splunk path without maintaining per-application metric names. The delivery audit continues to use the gateway's sent/failure/queue counters, so missing application points, exporter failures, or an undrained metrics queue invalidate the attempt rather than silently reducing the agent's evidence.
 
 The chart is configured from committed non-secret values plus a pre-created Kubernetes Secret. Tokens are passed through the Kubernetes API, never Helm command arguments, rendered values, prompts, or logs. `SF_TOKEN` remains the user/API query token while `SPLUNK_O11Y_INGEST_TOKEN` is the collector's least-privilege org ingest token. `SPLUNK_HOST` and `SPLUNK_HEC_PORT` form the HTTPS HEC endpoint; `SPLUNK_HEC_INDEX` defaults to `main`, must be allowed by the HEC token, and is recorded. TLS verification is on and has no v1 disable flag (R3, R7).
 
@@ -131,7 +132,7 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 1. CLI validates diagnosis-only Lite selection, explicit agent/judge models, credentials, Helm/Kubernetes access, Assistant connectivity, and provider configuration.
 2. Runner allocates an opaque attempt identity and binds it to artifacts/provider metadata without exposing the problem ID.
 3. Conductor removes leftovers; provider installs/upgrades the pinned collector with a pre-created Secret and the opaque identity.
-4. SRE Gym deploys Prometheus, Jaeger, its OTel collector with optional fan-out, the app/workload, baseline, and fault through the unchanged lifecycle.
+4. SRE Gym deploys Prometheus, Jaeger, its OTel collector with optional trace fan-out, the app/workload, baseline, and fault through the unchanged lifecycle; the Splunk gateway federates application-only series from the existing Prometheus service while its chart receivers continue to own Kubernetes metrics.
 5. Provider polls each required Splunk signal. Failure records an infrastructure-invalid artifact set and skips agent launch.
 6. Assistant driver calls `/get_app`, renders and records the frozen prompt, then opens one fresh explicit-model SSE session on the existing surface.
 7. Driver persists redacted ordered events. A single valid terminal diagnosis is posted once to `/submit`; SRE Gym's existing judge evaluates it unchanged.

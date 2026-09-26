@@ -113,12 +113,15 @@ The provider CLI selection is `--observability-provider none|splunk`, default `n
 - HEC uses `https://<SPLUNK_HOST>:<SPLUNK_HEC_PORT>/services/collector/event`; certificate verification remains enabled.
 - Chart resources are bounded and use one gateway replica for v1. No HA/autoscaling work is in scope.
 - Existing local Jaeger, Prometheus, Loki, and MCP deployments remain enabled and unchanged.
+- The Splunk gateway may scrape only SRE Gym Prometheus's `/federate` endpoint for application metrics. It must not independently discover every application endpoint or alter Prometheus's scrape configuration.
+- Federated points carry `sregym.metric.source=sregym_prometheus_application` and the same opaque attempt resource attributes as the other signals.
+- Federation excludes Kubernetes and collector/infrastructure scrape jobs already exported by the chart. It must not rely on an application metric-name allowlist or forward the unfiltered Prometheus catalog. It also drops Prometheus's `up` scrape-control series: an inactive application family can legitimately retain `up=0`, which is not application telemetry and otherwise causes the downstream receiver to report a false federation failure.
 
 ## Readiness Semantics
 
 The Splunk implementation must observe, not merely send, all four signals using `run_id`, `ApplicationScope.namespaces`, and `attempt_started_at`:
 
-- `metrics`: at least one run-scoped Kubernetes metric from the provider collector is returned.
+- `metrics`: at least one run-scoped Kubernetes metric from the provider collector and at least one run-scoped application metric marked `sregym.metric.source=sregym_prometheus_application` are returned.
 - `traces`: at least one application span/trace is returned.
 - `logs`: at least one container-log event is returned through the selected Logs Observer connection.
 - `kubernetes_events`: at least one Kubernetes event record is returned through the selected Logs Observer connection.

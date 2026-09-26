@@ -269,6 +269,74 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
         assert set(resources["limits"]) == {"cpu", "memory"}
 
 
+def test_values_federate_the_existing_application_catalog_without_kubernetes_duplicates():
+    values = yaml.safe_load(Path("sregym/observer/splunk/values.yaml").read_text())
+    config = values["gateway"]["config"]
+
+    receivers = config["receivers"]
+    assert set(receivers) == {"prometheus/sregym_application"}
+    scrape_configs = receivers["prometheus/sregym_application"]["config"]["scrape_configs"]
+    assert len(scrape_configs) == 1
+    scrape = scrape_configs[0]
+    assert scrape["metrics_path"] == "/federate"
+    assert scrape["honor_labels"] is True
+    assert scrape["static_configs"] == [
+        {"targets": ["prometheus-server.observe.svc.cluster.local:80"]}
+    ]
+    assert scrape["params"] == {
+        "match[]": [
+            '{job=~"blackbox-.+|.+-application|otel-spanmetrics.*"}'
+        ]
+    }
+
+    # Selection is by SRE Gym's existing application scrape-job taxonomy, not
+    # by enumerating application endpoints or maintaining application metric
+    # allowlists. Only Prometheus's own scrape-control series is excluded: a
+    # stale `up=0` from an inactive app family is not application telemetry and
+    # would be misclassified by the downstream receiver as a scrape failure.
+    encoded_receiver = yaml.safe_dump(receivers, sort_keys=True)
+    assert "hotel-reservation:5000" not in encoded_receiver
+    assert "social-network:9090" not in encoded_receiver
+    assert "astronomy-shop:8080" not in encoded_receiver
+    assert scrape["metric_relabel_configs"] == [
+        {
+            "source_labels": ["__name__"],
+            "regex": "up",
+            "action": "drop",
+        }
+    ]
+    assert "kube-state-metrics" not in encoded_receiver
+    assert "kubernetes-cadvisor" not in encoded_receiver
+    assert "node-exporter" not in encoded_receiver
+    assert "prometheus-self" not in encoded_receiver
+
+    source_processor = config["processors"]["resource/sregym_application_metrics"]
+    assert source_processor == {
+        "attributes": [
+            {
+                "action": "upsert",
+                "key": "sregym.metric.source",
+                "value": "sregym_prometheus_application",
+            }
+        ]
+    }
+    pipeline = config["service"]["pipelines"]["metrics/sregym_application"]
+    assert pipeline == {
+        "receivers": ["prometheus/sregym_application"],
+        "processors": [
+            "memory_limiter",
+            "resource/add_cluster_name",
+            "resource/add_custom_attrs",
+            "resource/sregym_application_metrics",
+            "batch",
+        ],
+        "exporters": ["signalfx"],
+    }
+    assert ACCESS_TOKEN not in yaml.safe_dump(config)
+    assert INGEST_TOKEN not in yaml.safe_dump(config)
+    assert HEC_TOKEN not in yaml.safe_dump(config)
+
+
 def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     commands: list[tuple[list[str], str | None]] = []
     core_api = Mock()
@@ -300,7 +368,7 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
         "splunk_observability_access_token": INGEST_TOKEN,
         "splunk_platform_hec_token": HEC_TOKEN,
     }
-    assert len(commands) == 1
+    assert len(commands) == 7
     command, stdin = commands[0]
     assert command[:4] == ["helm", "upgrade", "--install", RELEASE_NAME]
     assert command[command.index("--repository-config") + 1] == splunk_module.os.devnull
@@ -351,6 +419,63 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     assert ACCESS_TOKEN not in rendered_inputs
     assert INGEST_TOKEN not in rendered_inputs
     assert HEC_TOKEN not in rendered_inputs
+    assert [item for item, _ in commands[1:]] == [
+        [
+            "kubectl",
+            "rollout",
+            "restart",
+            f"deployment/{RELEASE_NAME}",
+            "--namespace",
+            NAMESPACE,
+        ],
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            f"deployment/{RELEASE_NAME}",
+            "--namespace",
+            NAMESPACE,
+            "--timeout",
+            "5m",
+        ],
+        [
+            "kubectl",
+            "rollout",
+            "restart",
+            f"deployment/{RELEASE_NAME}-k8s-cluster-receiver",
+            "--namespace",
+            NAMESPACE,
+        ],
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            f"deployment/{RELEASE_NAME}-k8s-cluster-receiver",
+            "--namespace",
+            NAMESPACE,
+            "--timeout",
+            "5m",
+        ],
+        [
+            "kubectl",
+            "rollout",
+            "restart",
+            f"daemonset/{RELEASE_NAME}-agent",
+            "--namespace",
+            NAMESPACE,
+        ],
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            f"daemonset/{RELEASE_NAME}-agent",
+            "--namespace",
+            NAMESPACE,
+            "--timeout",
+            "5m",
+        ],
+    ]
+    assert all(command_stdin is None for _, command_stdin in commands[1:])
 
 
 def test_prepare_replaces_an_existing_secret_and_accepts_existing_namespace():
@@ -393,6 +518,38 @@ def test_prepare_failures_are_classified_without_leaking_secrets(operation):
         provider.prepare_attempt(attempt_context())
 
     encoded = str(raised.value) + repr(raised.value) + json.dumps(serialize_provider_artifact(raised.value))
+    assert ACCESS_TOKEN not in encoded
+    assert HEC_TOKEN not in encoded
+
+
+def test_prepare_stops_safely_when_a_credential_rollout_fails():
+    commands: list[list[str]] = []
+
+    def run(command: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[:3] == ["kubectl", "rollout", "restart"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=f"access={ACCESS_TOKEN}",
+                stderr=f"hec={HEC_TOKEN}",
+            )
+        return successful_command(command, stdin)
+
+    provider = SplunkObservabilityProvider(
+        SplunkConfig.from_env(valid_environment()),
+        core_api=Mock(),
+        run=run,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        provider.prepare_attempt(attempt_context())
+
+    assert raised.value.kind == "configuration"
+    assert commands[0][:2] == ["helm", "upgrade"]
+    assert commands[1][:3] == ["kubectl", "rollout", "restart"]
+    assert len(commands) == 2
+    encoded = str(raised.value) + repr(raised.value)
     assert ACCESS_TOKEN not in encoded
     assert HEC_TOKEN not in encoded
 
@@ -658,7 +815,7 @@ def test_a_new_attempt_reconfigures_the_same_idempotent_release():
     export = provider.prepare_attempt(other)
 
     assert export.run_id == other.run_id
-    assert len(commands) == 2
+    assert len([command for command in commands if command[:2] == ["helm", "upgrade"]]) == 2
 
 
 def test_prepare_after_close_and_unprepared_assurance_methods_fail_safely():
@@ -804,14 +961,19 @@ def test_http_backend_rejects_missing_accessible_logs_connection():
 
 def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     requests: list[tuple[str, dict | None, str]] = []
+    signalflow_resolutions: list[str | None] = []
+    signalflow_stops: list[str | None] = []
     log_jobs = iter(("log-job", "event-job"))
     sse = "\n".join(
         (
             "event: metadata",
-            'data: {"tsId":"metric","properties":{"sf_streamLabel":"readiness"}}',
+            'data: {"tsId":"kubernetes","properties":{"sf_streamLabel":"kubernetes_metrics"}}',
+            "",
+            "event: metadata",
+            'data: {"tsId":"application","properties":{"sf_streamLabel":"application_metrics"}}',
             "",
             "event: data",
-            'data: {"logicalTimestampMs":1,"data":[{"tsId":"metric","value":2}]}',
+            'data: {"logicalTimestampMs":1,"data":[{"tsId":"kubernetes","value":2},{"tsId":"application","value":13}]}',
             "",
             "event: control-message",
             'data: {"event":"END_OF_CHANNEL","timestampMs":1}',
@@ -821,6 +983,8 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v2/signalflow/execute":
+            signalflow_resolutions.append(request.url.params.get("resolution"))
+            signalflow_stops.append(request.url.params.get("stop"))
             requests.append(("signalflow", None, request.content.decode()))
             return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
         payload = json.loads(request.content)
@@ -865,17 +1029,23 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     )
     context = attempt_context()
     scope = ApplicationScope("social-network", ("social-network", "observe"))
-    checked_at = NOW + timedelta(minutes=1)
+    checked_at = NOW + timedelta(minutes=3)
 
     counts = {
         signal: backend.query_signal(signal, context, scope, "connection-default", checked_at, 2.0)
         for signal in SIGNALS
     }
 
-    assert counts == dict.fromkeys(SIGNALS, 1) | {"metrics": 2}
+    assert counts == dict.fromkeys(SIGNALS, 1)
+    assert signalflow_resolutions == ["60000"]
+    assert signalflow_stops == [str(int((checked_at - timedelta(minutes=2)).timestamp() * 1000))]
     signalflow_program = next(content for operation, _, content in requests if operation == "signalflow")
-    assert "otelcol_exporter_sent_metric_points" in signalflow_program
+    assert "k8s.pod.phase" in signalflow_program
+    assert "probe_success" in signalflow_program
     assert f"filter('sregym.run.id', '{RUN_ID}')" in signalflow_program
+    assert "filter('sregym.metric.source', 'sregym_prometheus_application')" in signalflow_program
+    assert "filter('namespace', 'social-network')" in signalflow_program
+    assert "filter('k8s.namespace.name', 'social-network')" in signalflow_program
     trace_payload = next(payload for operation, payload, _ in requests if operation == "StartAnalyticsSearch")
     assert trace_payload is not None
     trace_tags = trace_payload["variables"]["parameters"]["sharedParameters"]["filters"][0]["spanFilters"][0]["tags"]
@@ -894,6 +1064,58 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     assert all(payload["variables"]["queryType"] == "SPL1" for payload in log_payloads)
     assert all(payload["variables"]["connectionID"] == "connection-default" for payload in log_payloads)
     assert all(payload["variables"]["queryParameters"]["timezone"] == "UTC" for payload in log_payloads)
+
+
+@pytest.mark.parametrize(
+    "kubernetes_count,application_count,expected",
+    ((1, 1, 1), (1, 0, 0), (0, 1, 0)),
+)
+def test_http_backend_requires_both_kubernetes_and_application_metrics(
+    kubernetes_count, application_count, expected
+):
+    sse = "\n".join(
+        (
+            "event: metadata",
+            'data: {"tsId":"kubernetes","properties":{"sf_streamLabel":"kubernetes_metrics"}}',
+            "",
+            "event: metadata",
+            'data: {"tsId":"application","properties":{"sf_streamLabel":"application_metrics"}}',
+            "",
+            "event: data",
+            "data: "
+            + json.dumps(
+                {
+                    "logicalTimestampMs": 1,
+                    "data": [
+                        {"tsId": "kubernetes", "value": kubernetes_count},
+                        {"tsId": "application", "value": application_count},
+                    ],
+                }
+            ),
+            "",
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/signalflow/execute"
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert (
+        backend.query_signal(
+            "metrics",
+            attempt_context(),
+            ApplicationScope("Social Network", ("social-network",)),
+            "connection-default",
+            NOW + timedelta(minutes=3),
+            2.0,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1214,7 +1436,7 @@ def test_http_backend_reads_collector_counters_and_normalizes_sparse_zero_failur
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
-    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=1), 2.0)
+    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=3), 2.0)
 
     assert result.sent == {"metrics": 5, "traces": 4, "logs": 3, "kubernetes_events": 3}
     assert result.send_failed == {"metrics": 0, "traces": 1, "logs": 0, "kubernetes_events": 0}
@@ -1255,7 +1477,7 @@ def test_http_backend_keeps_sparse_failure_counter_unknown_without_companion_evi
         ),
     )
 
-    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=1), 2.0)
+    result = backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=3), 2.0)
 
     assert result.send_failed == {
         "metrics": 0,
@@ -1264,6 +1486,20 @@ def test_http_backend_keeps_sparse_failure_counter_unknown_without_companion_evi
         "kubernetes_events": None,
     }
     assert result.enqueue_failed == result.send_failed
+
+
+def test_http_backend_defers_signalflow_until_the_ingestion_window_is_complete():
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request to {request.url.path}")
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(unexpected_request)),
+    )
+
+    assert backend.collector_snapshot(
+        attempt_context(), NOW + timedelta(minutes=1), 2.0
+    ) == snapshot(sent=None, failed=None, enqueue_failed=None, queue=None)
 
 
 def test_http_backend_closes_only_its_owned_client(monkeypatch):
@@ -1570,9 +1806,9 @@ def test_http_backend_handles_incomplete_or_malformed_signalflow_frames(body):
 
     if "not-json" in body and body.startswith("event: data\ndata: not-json"):
         with pytest.raises(SplunkBackendError):
-            backend.collector_snapshot(attempt_context(), NOW, 2.0)
+            backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=3), 2.0)
     else:
-        assert backend.collector_snapshot(attempt_context(), NOW, 2.0) == snapshot(
+        assert backend.collector_snapshot(attempt_context(), NOW + timedelta(minutes=3), 2.0) == snapshot(
             sent=None, failed=None, enqueue_failed=None, queue=None
         )
 

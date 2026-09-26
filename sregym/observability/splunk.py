@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, cast
 
@@ -39,6 +39,13 @@ RELEASE_NAME = "sregym-splunk-otel"
 NAMESPACE = "sregym-observability"
 SECRET_NAME = "sregym-splunk-otel-credentials"
 _HELM_TIMEOUT = "5m"
+_SIGNALFLOW_RESOLUTION_MS = 60_000
+_SIGNALFLOW_INGESTION_LAG = timedelta(minutes=2)
+_COLLECTOR_WORKLOADS = (
+    f"deployment/{RELEASE_NAME}",
+    f"deployment/{RELEASE_NAME}-k8s-cluster-receiver",
+    f"daemonset/{RELEASE_NAME}-agent",
+)
 _REQUIRED_ENV = (
     "SF_TOKEN",
     "SPLUNK_O11Y_INGEST_TOKEN",
@@ -213,12 +220,34 @@ class SplunkHttpBackend:
         timeout_seconds: float,
     ) -> int:
         if signal == "metrics":
-            program = (
-                "data('otelcol_exporter_sent_metric_points', filter=filter('sregym.run.id', "
-                f"'{context.run_id}'), rollup='latest').max().publish(label='readiness')"
+            application_namespaces = " or ".join(
+                f"filter('namespace', '{namespace}')" for namespace in scope.namespaces
             )
+            kubernetes_namespaces = " or ".join(
+                f"filter('k8s.namespace.name', '{namespace}')" for namespace in scope.namespaces
+            )
+            kubernetes_filter = (
+                f"filter('k8s.cluster.name', '{context.run_id}') and "
+                f"filter('sregym.run.id', '{context.run_id}') and "
+                f"({kubernetes_namespaces})"
+            )
+            application_filter = (
+                f"filter('sregym.run.id', '{context.run_id}') and "
+                "filter('sregym.metric.source', 'sregym_prometheus_application') and "
+                f"({application_namespaces})"
+            )
+            program = "\n".join(
+                (
+                    "data('k8s.pod.phase', filter="
+                    f"{kubernetes_filter}, rollup='latest').count().publish(label='kubernetes_metrics')",
+                    "data('probe_success', filter="
+                    f"{application_filter}, rollup='latest').count().publish(label='application_metrics')",
+                )
+            )
+            values = self._signalflow(program, context.attempt_started_at, checked_at, timeout_seconds)
             return int(
-                self._signalflow(program, context.attempt_started_at, checked_at, timeout_seconds).get("readiness", 0)
+                values.get("kubernetes_metrics", 0) > 0
+                and values.get("application_metrics", 0) > 0
             )
         if signal == "traces":
             payload = self._query_traces(context, scope, checked_at, timeout_seconds)
@@ -445,6 +474,12 @@ class SplunkHttpBackend:
         stop: datetime,
         timeout_seconds: float,
     ) -> dict[str, float]:
+        # SignalFlow keeps a bounded historical job open while its automatic
+        # ingest-delay window can still change the requested tail. Query a
+        # conservative completed window so HTTP timeouts remain meaningful.
+        safe_stop = stop - _SIGNALFLOW_INGESTION_LAG
+        if safe_stop <= start:
+            return {}
         response = self._request(
             "POST",
             f"{self._stream_base}/v2/signalflow/execute",
@@ -452,8 +487,13 @@ class SplunkHttpBackend:
             content=program,
             query_params={
                 "start": int(start.timestamp() * 1000),
-                "stop": int(stop.timestamp() * 1000),
-                "resolution": 1000,
+                "stop": int(safe_stop.timestamp() * 1000),
+                # Readiness and delivery need bounded aggregate evidence, not
+                # second-by-second chart fidelity. A one-minute resolution
+                # prevents high-cardinality Kubernetes and application series
+                # from making a normal deployment window exhaust the request
+                # timeout while still observing the 15-second scrape series.
+                "resolution": _SIGNALFLOW_RESOLUTION_MS,
                 "maxDelay": 0,
             },
             headers={"Content-Type": "text/plain"},
@@ -778,6 +818,33 @@ class SplunkObservabilityProvider:
             "configuration",
             "Splunk collector deployment failed",
         )
+        # The chart mounts credential keys as files, but those mounts may use
+        # subPaths and therefore do not reliably observe an updated Secret in
+        # a running pod. Roll each bounded workload sequentially so every
+        # exporter reads the current token without temporarily doubling all
+        # collector memory at once.
+        for workload in _COLLECTOR_WORKLOADS:
+            self._run_checked(
+                ["kubectl", "rollout", "restart", workload, "--namespace", NAMESPACE],
+                None,
+                "configuration",
+                "Splunk collector credential rollout failed",
+            )
+            self._run_checked(
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    workload,
+                    "--namespace",
+                    NAMESPACE,
+                    "--timeout",
+                    _HELM_TIMEOUT,
+                ],
+                None,
+                "configuration",
+                "Splunk collector credential rollout failed",
+            )
         export = ExternalOtlpExport(
             endpoint=f"{RELEASE_NAME}.{NAMESPACE}.svc.cluster.local:4317",
             run_id=context.run_id,

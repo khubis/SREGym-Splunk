@@ -74,6 +74,50 @@ gateway:
   tokenPassthrough: false
   mode: deployment
   replicaCount: 1
+  config:
+    receivers:
+      prometheus/sregym_application:
+        config:
+          scrape_configs:
+            - job_name: sregym-prometheus-application-federation
+              scrape_interval: 15s
+              scrape_timeout: 10s
+              metrics_path: /federate
+              honor_labels: true
+              params:
+                match[]:
+                  - '{job=~"blackbox-.+|.+-application|otel-spanmetrics.*"}'
+              # `up` describes Prometheus's source scrape, not the application.
+              # An inactive app family legitimately leaves an `up=0` series in
+              # Prometheus; forwarding it makes the downstream receiver report
+              # a false failure for an otherwise healthy /federate scrape.
+              metric_relabel_configs:
+                - source_labels:
+                    - __name__
+                  regex: up
+                  action: drop
+              static_configs:
+                - targets:
+                    - prometheus-server.observe.svc.cluster.local:80
+    processors:
+      resource/sregym_application_metrics:
+        attributes:
+          - action: upsert
+            key: sregym.metric.source
+            value: sregym_prometheus_application
+    service:
+      pipelines:
+        metrics/sregym_application:
+          receivers:
+            - prometheus/sregym_application
+          processors:
+            - memory_limiter
+            - resource/add_cluster_name
+            - resource/add_custom_attrs
+            - resource/sregym_application_metrics
+            - batch
+          exporters:
+            - signalfx
   resources:
     requests:
       cpu: 100m
