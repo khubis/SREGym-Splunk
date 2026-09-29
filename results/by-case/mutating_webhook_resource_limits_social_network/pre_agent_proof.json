@@ -1,0 +1,40 @@
+{
+  "case_id": "mutating_webhook_resource_limits_social_network",
+  "causal": {
+    "access_gap": "Pod objects show the 16Mi OOM symptom, but not the active mutating webhook or Deployment-template discrepancy.",
+    "check_id": "nginx_thrift_16mi_oomkilled_same_pod",
+    "interpretation": "A newly admitted nginx-thrift pod has 16Mi memory request/limit and an OOMKilled container.",
+    "matched_pod": "nginx-thrift-776f6575c5-lfgr6",
+    "remedy": "Inspect the Deployment and MutatingWebhookConfigurations through the Kubernetes API, or authorize their export.",
+    "signal": "kubernetes_pod_object",
+    "source_count": 1,
+    "splunk_count": 11,
+    "splunk_first_at": "2026-09-27T22:57:35.635000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_b5271ac50a51bd878e26996e298461ed",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-27T22:59:45.421062Z",
+    "start": "2026-09-27T22:57:21.205723Z"
+  }
+}

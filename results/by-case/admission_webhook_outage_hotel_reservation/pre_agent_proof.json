@@ -1,0 +1,30 @@
+{
+  "case_id": "admission_webhook_outage_hotel_reservation",
+  "causal": {
+    "access_gap": "The FailedCreate event is Splunk-visible, but the webhook failure policy and backend Service configuration are not in the approved pod/event export.",
+    "check_id": "recommendation_failed_create_broken_admission_webhook",
+    "interpretation": "Recommendation ReplicaSet cannot create a replacement pod because a policy webhook call fails.",
+    "remedy": "Inspect ValidatingWebhookConfiguration and backend Service through authorized Kubernetes API, or separately approve their export.",
+    "signal": "kubernetes_event_object",
+    "source_count": 1,
+    "source_webhook_confirmed": true,
+    "splunk_count": 15,
+    "splunk_first_at": "2026-09-28T06:06:32.982000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "events"
+  ],
+  "run_id": "anon_3746a4c80399fed4535809b57977561d",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T06:08:28.265467Z",
+    "start": "2026-09-28T06:06:30.890892Z"
+  }
+}

@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: unschedulable_incorrect_port_assignment
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/incorrect_port_assignment.py
+candidate_evidence:
+  - fact: "Checkout replacement pod is Pending because its nodeSelector names a nonexistent node"
+    signal: events
+    query_focus: "checkout FailedScheduling event and nodeSelector mismatch"
+  - fact: "Checkout PRODUCT_CATALOG_ADDR points to backend port 8082 instead of 8080"
+    signal: pods
+    query_focus: "checkout pod spec.containers.env PRODUCT_CATALOG_ADDR and spec.nodeSelector"

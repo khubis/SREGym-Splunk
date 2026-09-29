@@ -1,0 +1,34 @@
+{
+  "case_id": "network_policy_block",
+  "causal": {
+    "access_gap": "The approved pod/event export omits NetworkPolicy selector and ingress/egress rules. Run-scoped APM trace examples were not queryable at the gate time.",
+    "check_id": "network_policy_source_and_request_timeout",
+    "remedy": "Read the NetworkPolicy through Kubernetes, or separately authorize that object type in the receiver. Recheck APM indexing and run-tag propagation before claiming trace coverage.",
+    "signal": "container_logs",
+    "source_policy_confirmed": true,
+    "splunk_first_at": "2026-09-27T22:01:39.031000Z",
+    "splunk_timeout_count": 4,
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "logs"
+  ],
+  "run_id": "anon_2131da5c57ba2b4af8fc6c97dddb7932",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 0
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-27T22:03:28.781109Z",
+    "start": "2026-09-27T22:01:08.368776Z"
+  }
+}

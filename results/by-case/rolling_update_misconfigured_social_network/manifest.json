@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "d4849b1c88636d05668b708b0c51594523bf2013e04da24f93478327985931d0",
+    "atif_trace.json": "a5e6adeeee8c4ff7f2f78d50d7501bb9bfc54e15d13f02ac51be263eaa40e8c7",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "86291d5d3a5ed1eef8f9a955d6e53cb202e957276bcb831bd26edae31ff3081c",
+    "case_prompt_recipe.yaml": "6c84389df39172e771220b71b7b620fd62b4d4bb0c3133112617d63804ddd99c",
+    "delivery_audit.json": "f1b1fb88888621f53b7a4b6bd97fc2cf437f86e442a029f2e682b48cd89dc6a7",
+    "eval_metrics.json": "8958d38a3a3595df86dfa9cba071f1f404477d130e80f9cf146290642a5d1b3e",
+    "final_answer.md": "fcb94869a3e742f0854d6ee88abbd18005835cfe95d323b83ddd345791521f76",
+    "judge_raw.csv": "571d8d28be8cba841e1302da0fb76aa3bf35b6b9072d40448befb230aa217954",
+    "native_trace.jsonl": "aef6a60f4f03b2aa13ad388535e2b4c4712796b65f4eb1a7f75d2f4a365d077f",
+    "oracle_source.py": "661753532df22d20e1b341308dbb07940c9b9b536de929ffa9d70bd932d0e0ec",
+    "phase_ledger.jsonl": "a398d3e3f5635775bab64ce4816d5ea15f6d4d1235d857dd1ccb28f93a42b170",
+    "postrun_signals.json": "22e33ad55a4ced8e424ab684bd2ddb310dd0bbc98d3a917cb7e9397a9fc9d4ba",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "a7906935140a89c17e08625884d7a07f96e69c4443bac4bac95207c62608ff33",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "1f89a6b1ce9596a40b056f845492ffd49edf888a4937e5389298b7ce6b13a194",
+    "run_metadata.json": "4098b014defc6fd1cf83da7994f1e3c52537ade30f343253c0fdd55ef9e27129"
+  },
+  "benchmark_score": 89.0,
+  "case_id": "rolling_update_misconfigured_social_network",
+  "original_attempt": "results/0928_1049/assistant_v3/rolling_update_misconfigured_social_network/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

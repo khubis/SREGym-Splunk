@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "b7f935dddb9a3883cba2766269915574c4aea8f555e84a7e824b672f06e12954",
+    "atif_trace.json": "96c062a8fac63206ce591a32cd93da99bcf98f2e0fcad020019e51e24b49cf32",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "c990bab92164500af8b2b924380b3cabe5c52ffe5b41fdcd6cd97bcd36b4d2b4",
+    "case_prompt_recipe.yaml": "32581c14dc62427d87cb08302c117b956a342103bf1aab935374e4d5d9d6eb02",
+    "delivery_audit.json": "e0c02830b181f20a5adbcd5b6d00bf9589eabf296c9c3a0c3ac6a00a4cd82a14",
+    "eval_metrics.json": "226550c763d7e43df981b1f5329730c4b1b473ab5b5050fd9742e0eed40cad60",
+    "final_answer.md": "be7539fd1c1f327ebafc7ff7c72def3ba3bbec95b4a5b9ca736794f68a2dfa7c",
+    "judge_raw.csv": "5a12001813f16896420deb4cec5633fce876b4ab4324bb166ffcbe0e32b39fbe",
+    "native_trace.jsonl": "ca9b5cb12e9ce8815ba86697f4d0ec6dc6e9ecc3bb915170595c4e52a66a7b76",
+    "oracle_source.py": "38f5d73b930110a2b490ff22098b9358bac3489d193245ea91d8573ddb444f73",
+    "phase_ledger.jsonl": "8484b06a4cc1199b12992ba7e09824ca24d22fa6ba77814c5b62817d3b710e1a",
+    "postrun_signals.json": "3bf6fd051659a0d0cefde8627d1245c629c015be4c68cc5c1c053ec6b4ba4733",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "ee2dc2d1117c14add0dee4be984931239e556dd5432a60a4bc1717d4d857aecb",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "e219faedf6a0b40e59837a7eb5b1d9deb835d4291a8c6370107c7b55616a9fa4",
+    "run_metadata.json": "a37d04de26b5bdf6b6c5f4cf1f0e6c2aff05da1baf5ca86fc5a0b8cd2c4fccef"
+  },
+  "benchmark_score": 34.0,
+  "case_id": "finalizer_deadlock_controller_hotel_reservation",
+  "original_attempt": "results/0927_1615/assistant_v3/finalizer_deadlock_controller_hotel_reservation/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

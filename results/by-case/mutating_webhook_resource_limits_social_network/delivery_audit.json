@@ -1,0 +1,133 @@
+{
+  "closing": {
+    "ready": true,
+    "run_id": "anon_b5271ac50a51bd878e26996e298461ed",
+    "signals": [
+      {
+        "checked_at": "2026-09-27T23:12:33.824Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "metrics"
+      },
+      {
+        "checked_at": "2026-09-27T23:12:43.317Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "traces"
+      },
+      {
+        "checked_at": "2026-09-27T23:12:33.824Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "logs"
+      },
+      {
+        "checked_at": "2026-09-27T23:12:33.824Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "kubernetes_events"
+      }
+    ]
+  },
+  "drained": true,
+  "enqueue_failed_delta": {
+    "kubernetes_events": 0,
+    "logs": 0,
+    "metrics": 0,
+    "traces": 0
+  },
+  "first_visible_lag_ms": {
+    "kubernetes_events": 174187.33599999998,
+    "logs": 174187.33599999998,
+    "metrics": 266184.51599999995,
+    "traces": 293830.39300000004
+  },
+  "opening": {
+    "ready": true,
+    "run_id": "anon_b5271ac50a51bd878e26996e298461ed",
+    "signals": [
+      {
+        "checked_at": "2026-09-27T22:59:05.390Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "metrics"
+      },
+      {
+        "checked_at": "2026-09-27T22:59:33.036Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "traces"
+      },
+      {
+        "checked_at": "2026-09-27T22:57:33.393Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "logs"
+      },
+      {
+        "checked_at": "2026-09-27T22:57:33.393Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "kubernetes_events"
+      }
+    ]
+  },
+  "queue_final_size": {
+    "kubernetes_events": 0,
+    "logs": 0,
+    "metrics": 0,
+    "traces": 0
+  },
+  "queue_high_water": {
+    "kubernetes_events": 0,
+    "logs": 0,
+    "metrics": 1,
+    "traces": 0
+  },
+  "run_id": "anon_b5271ac50a51bd878e26996e298461ed",
+  "send_failed_delta": {
+    "kubernetes_events": 0,
+    "logs": 0,
+    "metrics": 0,
+    "traces": 0
+  },
+  "sent_delta": {
+    "kubernetes_events": 363,
+    "logs": 363,
+    "metrics": 147203,
+    "traces": 0
+  },
+  "valid": true
+}

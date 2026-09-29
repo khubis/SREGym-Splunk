@@ -1,0 +1,29 @@
+{
+  "case_id": "service_dns_resolution_failure_social_network",
+  "causal": {
+    "access_gap": "The source CoreDNS NXDOMAIN template is in a kube-system ConfigMap excluded from the approved Splunk pod/event export.",
+    "check_id": "coredns_nxdomain_source_and_failed_requests",
+    "interpretation": "The injected CoreDNS rule is present at source and the scoped workload reports non-2xx responses in Splunk; the log is a nonspecific symptom, not direct DNS proof.",
+    "remedy": "Use authorized Kubernetes CoreDNS ConfigMap or DNS-query access; separately approve export before claiming Splunk-only mechanism visibility.",
+    "signal": "container_logs",
+    "source_rule_confirmed": true,
+    "splunk_failed_response_count": 11,
+    "splunk_first_at": "2026-09-28T06:23:36.420000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "logs"
+  ],
+  "run_id": "anon_1162684e810a3d806da2aba7866a410f",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "logs": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T06:25:29.594902Z",
+    "start": "2026-09-28T06:23:14.651622Z"
+  }
+}

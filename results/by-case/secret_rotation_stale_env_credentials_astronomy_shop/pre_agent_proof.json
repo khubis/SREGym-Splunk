@@ -1,0 +1,29 @@
+{
+  "case_id": "secret_rotation_stale_env_credentials_astronomy_shop",
+  "causal": {
+    "access_gap": "Splunk pod objects show the startup Secret reference, but neither the rotated Secret value nor live PostgreSQL credential state is in the approved export.",
+    "check_id": "product_catalog_secret_ref_stale_pod_identity",
+    "interpretation": "The source Deployment marks the currently running product-catalog pod as the credential-source pod, and the same Secret-referencing pod is visible in Splunk.",
+    "remedy": "Use authorized Secret metadata and backend-auth state checks without exposing credential values; do not ingest raw Secrets.",
+    "signal": "kubernetes_pod_object",
+    "source_count": 1,
+    "splunk_count": 1,
+    "splunk_first_at": "2026-09-28T05:19:02.412000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "pods"
+  ],
+  "run_id": "anon_4c56d59ed8492ed9958743663203e894",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "pods": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T05:20:38.492650Z",
+    "start": "2026-09-28T05:18:58.787831Z"
+  }
+}

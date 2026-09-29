@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: hotel_reservation
+window: runtime_incident_utc
+symptom: Hotel Reservation cleanup has been delayed.
+source_observation: Pre-agent cleanup-controller retries and pending object age.

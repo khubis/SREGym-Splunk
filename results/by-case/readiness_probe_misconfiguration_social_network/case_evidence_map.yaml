@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: readiness_probe_misconfiguration_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/readiness_probe_misconfiguration.py
+candidate_evidence:
+  - fact: "user-service readiness probe targets nonexistent /healthz on port 8080 and pods stay NotReady"
+    signal: pods
+    query_focus: "user-service pod spec.readinessProbe and status.conditions Ready=false"
+  - fact: "Probe failures appear as Kubernetes events"
+    signal: events
+    query_focus: "user-service Unhealthy/readiness events"

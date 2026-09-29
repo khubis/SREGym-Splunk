@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "307aa9e6ab8a5f8afa7ec46383cb026e7ecafa9b21736705521026a18121a7a6",
+    "atif_trace.json": "b6341e538d5e829ef3af44dad40096b138b5a86830c79d91fb5621ca9ccb9655",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "2a59fd325fc4d0c92d10e47afc756c468a0d0398d578223afc90d9ea4b84b08b",
+    "case_prompt_recipe.yaml": "c3992a0cbcc08748b0faa9c7940de9766a05ae6783e8be1af48d83a8bef8990f",
+    "delivery_audit.json": "d6d1a021dee495c52e3ccdfaa1e63b8d2caf7c1770fe174683590fcc005d6124",
+    "eval_metrics.json": "be14be834d96153e9099bd66249bddf1159bebfe22a3aaa25684d4a9be22527c",
+    "final_answer.md": "2fe303b6c9ff02c703bca27ffdd2b4bce5f60d6b04a2b080522844267a7b1c7b",
+    "judge_raw.csv": "9c3e22fcdbb5dd43b520771d603602a7cc4039ecfc934466c2134f8363895628",
+    "native_trace.jsonl": "541b3dbdf3e427ef103e46dbaf0200109cc15eedb4288a94268f22f4085e8033",
+    "oracle_source.py": "98e81324be7f68d43494dd85655adb23a426fec69fffa333c93de6c663aa9384",
+    "phase_ledger.jsonl": "c5a0fd019368212a87dad8a59ec4a66d93fbdf0637df6254f0958ec5f74a3f5a",
+    "postrun_signals.json": "5e3c899bd8a41b756ac23e6917f32891710fc9020862f7184a3c529be87743a4",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "ddeb6115b6d2c6dbc826bb4643574c86b7f5d437df208bb2dd4f6657cbb85149",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "c7b7b6089dc7567ed782f225bab1f09bb0ad65eeb2fc99c0e3ac5a0d1373d982",
+    "run_metadata.json": "e77e6319148aa76d5b7ae62aacb0df7abb61e81d00ca5272fa96f53db6316a25"
+  },
+  "benchmark_score": 34.0,
+  "case_id": "edge_request_filter_cpu_saturation",
+  "original_attempt": "results/0927_1345/assistant_v3/edge_request_filter_cpu_saturation/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

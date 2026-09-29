@@ -1,0 +1,27 @@
+{
+  "case_id": "unschedulable_incorrect_port_assignment",
+  "causal": {
+    "check_id": "checkout_pending_bad_node_and_backend_port",
+    "interpretation": "The same new Pending checkout pod is pinned to nonexistent extra-node and points its product-catalog address to port 8082.",
+    "signal": "kubernetes_pod_object",
+    "source_count": 1,
+    "splunk_count": 2,
+    "splunk_first_at": "2026-09-28T05:39:52.945000Z",
+    "status": "confirmed",
+    "visibility": "fully_splunk_observable"
+  },
+  "required_signals": [
+    "pods"
+  ],
+  "run_id": "anon_71747fc6c5576d1a2084f2ee8a8da470",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "pods": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-28T05:41:37.868280Z",
+    "start": "2026-09-28T05:39:46.585361Z"
+  }
+}

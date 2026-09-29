@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: valkey_auth_disruption
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/valkey_auth_disruption.py
+candidate_evidence:
+  - fact: "Invalid Valkey password prevents dependent cart services from establishing cache sessions"
+    signal: logs
+    query_focus: "cart-to-valkey authentication failures and cart operation errors"
+  - fact: "Failed cart dependencies appear in traces"
+    signal: traces
+    query_focus: "cart-service spans involving valkey-cart"

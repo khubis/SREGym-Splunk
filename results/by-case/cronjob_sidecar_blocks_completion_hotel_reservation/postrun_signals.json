@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "cronjob_sidecar_blocks_completion_hotel_reservation",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "hotel-reservation",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_9faffdcb7ce9c108378653a149335608",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-27T20:36:31.711651Z",
+    "start": "2026-09-27T20:34:12.208355Z"
+  }
+}

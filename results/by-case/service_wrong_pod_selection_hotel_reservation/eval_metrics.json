@@ -1,0 +1,12 @@
+{
+  "agent_duration_ms": 521566.78615300916,
+  "failed_tool_results": 9,
+  "input_tokens": 2249172,
+  "output_tokens": 19165,
+  "reasoning_tokens": 6194,
+  "schema": "sregym.assistant_v3.metrics.v1",
+  "terminal_outcome": "completed",
+  "time_to_first_event_ms": 627.818,
+  "tool_calls": 57,
+  "total_tokens": 2268337
+}

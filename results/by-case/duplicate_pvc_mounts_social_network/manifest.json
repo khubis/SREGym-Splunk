@@ -1,0 +1,27 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "01f163cb33bb198bb93e2eef74b89f5b1b36e80ab8854b17c12f6ca04b4e9b69",
+    "atif_trace.json": "fe387ec24e7122d13b9922aea712dd5e77e79bd2735810fc1cf2d45500ea8d94",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "5613c92462061aa12688ae14b15d7eb6daf0d201b673840886934a79a807925a",
+    "case_prompt_recipe.yaml": "3e0578db8b05d3b13a9a1e32e7c4e6a0cad7493e65f59e270fad1cda0ccdf07b",
+    "delivery_audit.json": "eacf057e43f287f6f6e5f5d22e34eaba91ff6a0715dfec95ec4d8061587d254f",
+    "eval_metrics.json": "80b33ecd4dc6129ce016332bbd83175d0cda69a17a3e151428f1d28fad87a110",
+    "final_answer.md": "928474081d755a283848d1f3e3ee5c1a0626c26cdfa99a4a21fef73b383b5812",
+    "judge_raw.csv": "2b1869201907bb136afdd36bd8caf1844e417a7db3f24fdd5ad44d9bf854ce63",
+    "native_trace.jsonl": "81aa3a6c83700d370ae2b02d80a07d988495f2d337ff678222047cb41de3587c",
+    "oracle_source.py": "52dc76a42075d9477fe6b01909218edc4a3aa5e9c04aaaa46fb718da9e1d9572",
+    "phase_ledger.jsonl": "04d2dfd7a80fd672410746664df83489c5a0d5b67949942f2ff9eaa6a80bb210",
+    "postgrade_golden_telemetry.json": "0e7abdad20913ea6314e22c25f74f6d2837c2491e4385ce92698e4f3a3374d0a",
+    "postrun_signals.json": "1ffd63252316fdde327353bd91eabb68a79521d930fad792ddadb59dd50517cd",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "9f76eb954e39a9820bac85cf95dda295f0b4d31af7a9bd07b27a6fa3e5e95344",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "caddbf809a0770e94301188b400c4e1db83e0133a4f8292b4c54115e82f4fb78",
+    "run_metadata.json": "fd1c243ad5a4c1cddd600cbdb9479b10d79f18111878a2547d68b889bcbc3093"
+  },
+  "benchmark_score": 0.0,
+  "case_id": "duplicate_pvc_mounts_social_network",
+  "original_attempt": "results/0928_1450/assistant_v3/duplicate_pvc_mounts_social_network/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

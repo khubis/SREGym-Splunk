@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: astronomy_shop
+window: runtime_incident_utc
+symptom: Some Astronomy Shop recommendation requests are failing.
+source_observation: Pre-agent recommendation request failures by caller.

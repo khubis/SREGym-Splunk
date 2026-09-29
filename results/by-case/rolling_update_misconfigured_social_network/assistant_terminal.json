@@ -1,0 +1,10 @@
+{
+  "final_text": "> **Root cause:** custom-service's ready-container population shifted at 2026-09-28T17:52:10Z during a ReplicaSet replacement in which the original custom-service-5c68f797 containers were stopped at 17:52:08Z and replacement pods remained Pending/PodInitializing, while the Deployment or configuration change that initiated the successive ReplicaSets remains unknown.\n\n**Status:** likely cause\n\n**Confidence:** medium\n\n**Why this conclusion:** The custom-service ready population departed from a stable zero-container guard at 17:52:10Z and remained degraded through the end of the requested window. Kubernetes records show the original ReplicaSet was scaled down and its containers explicitly stopped with restart count 0, while replacement ReplicaSets were created but their pods remained in Pending/PodInitializing states. Successful scheduler assignments and the absence of FailedScheduling or admission-rejection events weaken scheduling and admission failure as the cause; the evidence instead supports rollout-induced replacement loss rather than an in-pod crash loop.\n\n**Impact:** The custom-service ready-container count was 0 before the event, rose to 3 at 17:52:10Z, briefly reached 6 at 17:52:20Z, then remained at 3 from 17:52:50Z through 17:54:10Z. Recovery was not observable before the requested telemetry window ended at 2026-09-28T17:54:19.475797Z.\n\n**Problem period:** 2026-09-28T17:52:10Z–2026-09-28T17:54:19.475797Z; onset established, recovery unresolved; likely cause.\n\n**Caveat:** The evidence does not establish that the terminated original pods were ready\n\n**Next check:** Unavailable: obtain the Deployment rollout or configuration-change record that created custom-service-5d95dbc564 and custom-service-9ff7877b9 to determine what change initiated the replacement.",
+  "outcome": "completed",
+  "resolved_model": "gpt-5.6-luna",
+  "resolved_reasoning": "medium",
+  "schema": "sregym.assistant_v3.terminal.v1",
+  "session_id": "asst_v3_khnp7fWXow5tKFh5AU4LpqOQHRjaG6em",
+  "submission_count": 1,
+  "submitted": true
+}

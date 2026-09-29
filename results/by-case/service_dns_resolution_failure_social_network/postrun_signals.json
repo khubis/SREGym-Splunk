@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "service_dns_resolution_failure_social_network",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "social-network",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_1162684e810a3d806da2aba7866a410f",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-28T06:25:29.594902Z",
+    "start": "2026-09-28T06:23:14.651622Z"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "case_id": "env_variable_shadowing_astronomy_shop",
+  "causal": {
+    "check_id": "frontend_proxy_ordered_duplicate_host_env",
+    "interpretation": "The same new frontend proxy pod contains the ordered duplicate host environment entries.",
+    "matched_pod": "frontend-proxy-76df695f45-sgr44",
+    "signal": "kubernetes_pod_object",
+    "source_count": 1,
+    "splunk_count": 5,
+    "splunk_first_at": "2026-09-27T22:18:25.939000Z",
+    "status": "confirmed",
+    "visibility": "fully_splunk_observable"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_b3391aa2062935a6d00eb9189e433fcc",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-27T22:20:31.025050Z",
+    "start": "2026-09-27T22:18:25.811660Z"
+  }
+}

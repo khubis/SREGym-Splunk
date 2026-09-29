@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "fe6a150960abdfc06bc4814e5aef4ff72bbedd58b4be5acb27e16d6eb0b0a95b",
+    "atif_trace.json": "81e5ff6ff119e53007362dca12793e2caf702ed023f0749764ef440bfec51bb7",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "7c0d50847c2f3c69789ea8fb0e6d7e32536b66585a02919e485cf3218d8e6013",
+    "case_prompt_recipe.yaml": "0cb885587619969772ffe952fe1fb5ef93c2d5682e3aa1b964cdc293a8140fe9",
+    "delivery_audit.json": "7888ed65f3858d5d24dbf820ac5d639f9f5f8381719c573cbf53df2fd9f22d9a",
+    "eval_metrics.json": "a35bea3fbfa56c911f3f7795ffd584d65ecc0f1e7bc60058297b7b0a0d9d571c",
+    "final_answer.md": "bd7b1ae58898b93e9a38a93f6208e7819dd0fb6d5507cdb238d29ab045758c06",
+    "judge_raw.csv": "f038156e2b8d9ee866201a4d55f672b339ccb6c5d5a1266ec711a0832e91524f",
+    "native_trace.jsonl": "184f736175ae69d39385c8c22e827c8f88667bcf7ed54b953595fdf3be58d3c4",
+    "oracle_source.py": "c9adfc3655d662153723a786335ab096d4866e9a686e568e7b883b0381e22422",
+    "phase_ledger.jsonl": "b33d831e6419f0c3030cdceb4b6271d34f04b44c4bb9f7bc2d1a997c862064f4",
+    "postrun_signals.json": "3612b183ca56959fdc9b2b7fa6211c5114aa441f3040e8d3daeef8707511594c",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "82a9791741b6f6f8c6c8ec67dd3f1b301871a6a4c2020158e03063136a4680d5",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "626f2a31639480c3007d7fcc37d447126f4efe743ad5e31dec432dc85d178d4b",
+    "run_metadata.json": "72dfae361858091bfd898a2948de767eacdbaf82cc1e5230b26cf1e9c5f56363"
+  },
+  "benchmark_score": 0.0,
+  "case_id": "kafka_poison_pill_hol_block",
+  "original_attempt": "results/0927_1954/assistant_v3/kafka_poison_pill_hol_block/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

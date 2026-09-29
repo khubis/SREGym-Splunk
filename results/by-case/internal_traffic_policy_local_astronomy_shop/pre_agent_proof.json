@@ -1,0 +1,41 @@
+{
+  "case_id": "internal_traffic_policy_local_astronomy_shop",
+  "causal": {
+    "access_gap": "Service spec.internalTrafficPolicy is not exported by the approved pods/events object receiver; use authorized Kubernetes Service API or separately approved export.",
+    "check_id": "internal_traffic_local_cross_node_topology",
+    "interpretation": "New frontend and recommendation pods are on different nodes; source Service policy is Local, but Splunk only proves placement.",
+    "remedy": "Inspect the recommendation Service through an authorized Kubernetes API; export Service objects only after separate approval.",
+    "signal": "kubernetes_pod_object",
+    "source_count": 2,
+    "source_cross_node": true,
+    "source_policy_local": true,
+    "splunk_count": 2,
+    "splunk_cross_node": true,
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_fe17bbbbe40bac5fc6f69d7425ace06b",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T03:48:36.778055Z",
+    "start": "2026-09-28T03:46:13.118664Z"
+  }
+}

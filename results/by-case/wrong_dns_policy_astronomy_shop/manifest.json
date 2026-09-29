@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "e0a2c0399902ca7d1d4378e4a9bab72fe25c254a67cfd7b729ef58ea270038d8",
+    "atif_trace.json": "db64acf56cd59a6a18b2e2f7043a6ca3999172ee74cc6903626918504500a98c",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "35699e21937462a0752bc06020573b1047de18d0c9ab033793fb8b9a4ebc1491",
+    "case_prompt_recipe.yaml": "1d8507d5d0f896027a523471c1b11cbbd2fd2185265640069452f6a19f52f409",
+    "delivery_audit.json": "384b9af80eeea002545049b51bf0fc31d2e20a2c8a6290a35de72b3f6239fec0",
+    "eval_metrics.json": "7832f14d3691d1c431e908cd0e54b7ba31b260a38c9f6d07367645f5d18d261b",
+    "final_answer.md": "0df7cccec37c16fbb7e4180f2ea1ce94188f1f665d607981a50c204f403da567",
+    "judge_raw.csv": "0897f8f534bbddd2c005d7a05fed030510e1e29ba6d45cfb886d4154ae3e8688",
+    "native_trace.jsonl": "e94b3a7ecc687d31319de3b36a56f6f3cd65481fe4b13256bf862ae5a72e5226",
+    "oracle_source.py": "bb8040028aea514091e9bd51790cdd8b45f5531091953a61f20fa8c0f3d6254a",
+    "phase_ledger.jsonl": "0ec705759068ab644723c948d5f65198a3e09c69c82e626bc180c2d9c0973f9a",
+    "postrun_signals.json": "6df669a14c38ccc31b51cad5edd9b8d5af2cf09b3645b981038e40fa59da72fc",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "8736bbeba9ab86baf4d4fc3255421977f0dd8a491e408f032e9c8160a4d523ec",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "8f9332a2297604050109a861b20da3454998625bac0af843853022c104c5ce38",
+    "run_metadata.json": "bdead2f6ce20d7e70569ccb7934911c05ae2e5945c28c6a2e5ed74cc182093f3"
+  },
+  "benchmark_score": 23.0,
+  "case_id": "wrong_dns_policy_astronomy_shop",
+  "original_attempt": "results/0927_1704/assistant_v3/wrong_dns_policy_astronomy_shop/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

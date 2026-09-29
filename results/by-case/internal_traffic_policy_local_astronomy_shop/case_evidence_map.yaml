@@ -1,0 +1,14 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: internal_traffic_policy_local_astronomy_shop
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/internal_traffic_policy_local.py
+candidate_evidence:
+  - fact: "Recommendation routing fails only for affected topology"
+    signal: traces
+    query_focus: "recommendation request errors by caller/node"
+  - fact: "frontend and recommendation pods run on different nodes"
+    signal: pods
+    query_focus: "frontend and recommendation pod spec.nodeName"
+  - fact: "recommendation Service internalTrafficPolicy is Local and cannot be read from pod/event objects"
+    signal: other_kubernetes_api
+    query_focus: "recommendation Service spec.internalTrafficPolicy and endpoints"

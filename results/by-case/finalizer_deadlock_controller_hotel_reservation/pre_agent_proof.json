@@ -1,0 +1,35 @@
+{
+  "case_id": "finalizer_deadlock_controller_hotel_reservation",
+  "causal": {
+    "access_gap": "The approved export omits the ConfigMap finalizer and the controller ClusterRole verbs. Run-scoped APM trace examples were not queryable at the gate time.",
+    "check_id": "cleanup_controller_finalizer_patch_403",
+    "interpretation": "The cleanup controller repeatedly receives HTTP 403 while reconciling deletion.",
+    "remedy": "Read the ConfigMap and ClusterRole through Kubernetes, or authorize those object types for export. Recheck APM indexing and run-tag propagation before claiming trace coverage.",
+    "signal": "container_logs",
+    "source_count": 59,
+    "splunk_count": 59,
+    "splunk_first_at": "2026-09-27T23:19:02.472000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "logs"
+  ],
+  "run_id": "anon_6a9a367fd6d3e3f7bca582859905eb06",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 0
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-27T23:21:00.408157Z",
+    "start": "2026-09-27T23:18:55.946611Z"
+  }
+}

@@ -1,0 +1,13 @@
+> **Finding:** The `checkout` container in pod `checkout-7d8599f789-bwdwx` failed with exit code **2** and reason **Error**, causing Kubernetes to mark the pod `PodFailed`, stop it, and delete it. This removed checkout availability and propagated as HTTP 500 responses from `POST /api/checkout`; the underlying application trigger for exit code 2 is not present in the available telemetry.
+
+**Status:** mechanism found but trigger missing
+
+**Confidence:** low
+
+**Why this conclusion:** During the requested window, checkout recorded 22 errors from 161 requests, with a 51-second P90 latency, while the load generator recorded HTTP 500 responses from `/api/checkout`. Kubernetes telemetry shows the checkout pod became Ready at 05:39:38Z, then its container terminated with exit code 2 at 05:39:46Z; kubelet emitted `Killing` / `Stopping container checkout`, marked it `Ready=False` with `PodFailed`, and the pod was deleted by 05:40:16Z. Cart, product-catalog, and flagd-related services also showed errors, but no dependency log evidence establishes them as the trigger, while the direct checkout process termination explains the availability failure.
+
+**Impact:** Checkout had 161 requests, 22 errors, a 13.7% error rate, and 51,000 ms P90 latency. `oteldemo.CheckoutService` had 9 requests with 8 errors. The load generator observed HTTP 500 responses from `POST /api/checkout`.
+
+**Calibration:** Not calibrated — 2026-09-28T05:39:46.585361Z through 2026-09-28T05:41:37.868280Z. Problem onset, recovery, and episode completeness were not established.
+
+**Next check:** Inspect the previous logs and termination message for `checkout-7d8599f789-bwdwx` to identify why the checkout process exited with code 2.

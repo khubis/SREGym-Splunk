@@ -1,0 +1,39 @@
+{
+  "case_id": "cronjob_sidecar_blocks_completion_hotel_reservation",
+  "causal": {
+    "check_id": "cronjob_regular_sidecar_stays_running",
+    "interpretation": "Distinct Jobs show Completed archivers and running regular fluent-bit sidecars.",
+    "matched_at": "2026-09-27T20:35:04.427000Z",
+    "matched_pod": "audit-log-archiver-29842355-5cch7",
+    "signal": "kubernetes_pod_object",
+    "source_count": 2,
+    "source_job_count": 2,
+    "splunk_count": 2,
+    "splunk_job_count": 2,
+    "status": "confirmed"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_9faffdcb7ce9c108378653a149335608",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-27T20:36:31.711651Z",
+    "start": "2026-09-27T20:34:12.208355Z"
+  }
+}

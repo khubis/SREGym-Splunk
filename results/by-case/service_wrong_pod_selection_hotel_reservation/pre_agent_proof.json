@@ -1,0 +1,47 @@
+{
+  "case_id": "service_wrong_pod_selection_hotel_reservation",
+  "causal": {
+    "access_gap": "The source frontend Service selector is not exported by the approved pod/event receiver; Splunk pod objects show both frontend and search have the selected label.",
+    "check_id": "frontend_service_selects_search_pod",
+    "interpretation": "A frontend Service selector also matches a search pod listening on 8082 rather than frontend's 5000.",
+    "remedy": "Inspect frontend Service and EndpointSlices through an authorized Kubernetes API, or separately approve Service object export.",
+    "signal": "kubernetes_pod_object",
+    "source_count": 2,
+    "source_roles": [
+      "frontend",
+      "search"
+    ],
+    "source_service_selector_confirmed": true,
+    "splunk_count": 3,
+    "splunk_roles": [
+      "frontend",
+      "search"
+    ],
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_848d5d55b09c038c151b7bcbf2b0e37a",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T04:16:10.808424Z",
+    "start": "2026-09-28T04:13:49.059376Z"
+  }
+}

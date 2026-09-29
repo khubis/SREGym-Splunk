@@ -1,0 +1,34 @@
+{
+  "case_id": "kafka_poison_pill_hol_block",
+  "causal": {
+    "check_id": "kafka_poison_offset_and_paused_partition",
+    "interpretation": "The same consumer rejects offset 20 and leaves its partition paused; Kafka offset inspection is corroboration.",
+    "optional_corroboration": "Kafka consumer-group offset/lag and the record payload require Kafka data-plane access.",
+    "signal": "container_logs",
+    "source_counts": {
+      "paused": 3,
+      "validation": 1
+    },
+    "splunk_counts": {
+      "paused": 3,
+      "validation": 1
+    },
+    "splunk_first_at": "2026-09-28T02:58:33.327000Z",
+    "status": "confirmed",
+    "visibility": "fully_splunk_observable"
+  },
+  "required_signals": [
+    "logs"
+  ],
+  "run_id": "anon_8d8fe232660dc7ef3092735ae08573ca",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "logs": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-28T02:59:23.894717Z",
+    "start": "2026-09-28T02:58:14.893574Z"
+  }
+}

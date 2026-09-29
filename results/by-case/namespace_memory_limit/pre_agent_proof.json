@@ -1,0 +1,40 @@
+{
+  "case_id": "namespace_memory_limit",
+  "causal": {
+    "access_gap": "The quota's hard memory requirement is not exported by the approved pods/events receiver; the admission event is visible in Splunk.",
+    "check_id": "search_failed_create_memory_quota_event",
+    "interpretation": "A search ReplicaSet cannot create a replacement pod because admission requires memory declarations.",
+    "remedy": "Inspect the ResourceQuota and search Deployment template through authorized Kubernetes API, or separately approve their export.",
+    "signal": "kubernetes_event_object",
+    "source_count": 10,
+    "source_quota_confirmed": true,
+    "splunk_count": 15,
+    "splunk_first_at": "2026-09-28T04:31:03.730000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_049fb41a2bc039f9894771f022dbcd09",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T04:33:47.563618Z",
+    "start": "2026-09-28T04:31:02.704731Z"
+  }
+}

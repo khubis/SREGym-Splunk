@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "duplicate_pvc_mounts_social_network",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "social-network",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_b3802ae8435645816000e26907fe29fe",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-28T21:55:25.748907Z",
+    "start": "2026-09-28T21:52:52.706377Z"
+  }
+}

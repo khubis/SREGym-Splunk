@@ -1,0 +1,35 @@
+{
+  "case_id": "search_rate_retry_collapse_hotel_reservation",
+  "causal": {
+    "access_gap": "This check does not prove the post-trigger counter deltas or retry-policy settings in Splunk; no Kubernetes-only gap is asserted.",
+    "check_id": "search_rate_post_trigger_backlog_and_attempt_counters",
+    "interpretation": "The injected fault is established at source; Splunk has the same named counters and sustained rate-service queue backlog.",
+    "metric_names": [
+      "rate_queue_depth",
+      "search_requests_total",
+      "search_rate_attempts_total"
+    ],
+    "remedy": "Compare bounded historical request/attempt deltas and inspect the scoped search/rate pod objects before claiming the full feedback loop.",
+    "signal": "application_metrics",
+    "source_backlog_confirmed": true,
+    "source_metric_count": 3,
+    "splunk_backlog_confirmed": true,
+    "splunk_metric_count": 3,
+    "status": "symptom_confirmed",
+    "visibility": "partially_splunk_observable"
+  },
+  "required_signals": [
+    "metrics"
+  ],
+  "run_id": "anon_e11da8c14896f0d7f5ac5b240b49ebc5",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "metrics": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T22:19:06.567380Z",
+    "start": "2026-09-28T22:16:21.818989Z"
+  }
+}

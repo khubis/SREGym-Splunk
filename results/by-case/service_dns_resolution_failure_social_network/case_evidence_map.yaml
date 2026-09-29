@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: service_dns_resolution_failure_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/service_dns_resolution_failure.py
+candidate_evidence:
+  - fact: "user-service.social-network.svc.cluster.local resolves NXDOMAIN for callers"
+    signal: logs
+    query_focus: "caller resolver NXDOMAIN for user-service.social-network.svc.cluster.local"
+  - fact: "Injected CoreDNS NXDOMAIN template requires kube-system ConfigMap or DNS query access"
+    signal: other_kubernetes_api
+    query_focus: "kube-system/coredns ConfigMap template; kube-system logs are excluded from HEC"

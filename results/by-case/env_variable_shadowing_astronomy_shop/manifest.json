@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "200ddca5d1cb5a10c90092aeaa463649345c8cfe63ae4ed6dc6f9b1c5b01b663",
+    "atif_trace.json": "741b895c26e08d88df96a343e7c20cb052350998b24192b3493d211f7255413a",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "5d366d8163d50fbda6216ce77f86326f6e113da454bbdbed855f088262080a4d",
+    "case_prompt_recipe.yaml": "8f1857a184f06437fe2d3c7a3dc121b8cd24eec5c322e09259616abc06103bf5",
+    "delivery_audit.json": "f5e7912c44ef7a2f75d04ce8fbc8c736ef5aa605db23ff69594c5f58d7fd7ba1",
+    "eval_metrics.json": "95a7e8817bb9953f03392aa3480082586b329108aa75c21c87f19743b6a9f949",
+    "final_answer.md": "43316b570b6a37f00977769a7e30fe16fbf256c0dc099cb24640c569cb106738",
+    "judge_raw.csv": "1fdbf169dd4a8725ffbc99182eed4e1f0f8fc834c616fdafd059447ad4f38a98",
+    "native_trace.jsonl": "9f029d0ddc47d13b7240c370f3fb398c81affb0603b3c290349458c4b0e95aee",
+    "oracle_source.py": "17fb74e84a2d5756537a6203ba1c9d39c8ed081fdecb4d643876cd30b40f6da7",
+    "phase_ledger.jsonl": "22cda6e9887e7632b66ecc9c3c2a4e5e66dad23a92457ff7d9362588bfaf8802",
+    "postrun_signals.json": "0221abe7ac6c6cbe24e3ccd01c271f034b8c681c2b98c1a41193950fc3adba3d",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "ee1fb12598555cb1f5727738df6c65fdab8b34eac17852266ffd49ea590b8878",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "b4b155d2d8c8cb77d13ed60763d5b8d47e95b504c507a0cbcdceb804853454b9",
+    "run_metadata.json": "210a0564018ff251b5c8b07c1f99c87cce84b8cdb02666d54b37af91a38656eb"
+  },
+  "benchmark_score": 0.0,
+  "case_id": "env_variable_shadowing_astronomy_shop",
+  "original_attempt": "results/0927_1514/assistant_v3/env_variable_shadowing_astronomy_shop/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

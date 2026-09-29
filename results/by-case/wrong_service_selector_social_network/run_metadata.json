@@ -1,0 +1,91 @@
+{
+  "agent_ended_at": "2026-09-28T17:44:46.207Z",
+  "agent_name": "assistant_v3",
+  "agent_started_at": "2026-09-28T17:36:39.384Z",
+  "agent_version": null,
+  "attempt": 1,
+  "attempt_started_at": "2026-09-28T17:34:28.054Z",
+  "benchmark_profile": "svelte",
+  "capability_profile": "splunk_o11y_read_only_no_direct_kubernetes",
+  "classification": "completed",
+  "comparable": false,
+  "hec_index": "main",
+  "included_in_diagnosis_pass_rate": true,
+  "judge_backend": "api",
+  "judge_model": "azure/gpt-5.6-luna",
+  "logs_connection_id": "HPEC1vyAAAA",
+  "observability_chart_version": "0.160.0",
+  "observability_provider": "splunk",
+  "problem_id": "wrong_service_selector_social_network",
+  "prompt_provenance": {
+    "profile_id": "sregym-stratus-diagnosis-v1",
+    "profile_sha256": "003c952ea8365b5d6840b561a8928d50394a7245abedd1af874a05fbbe4bfbb2",
+    "reference_sha256": "6dac52b47f7b3da387f22aab311962f5106b9bb0537263e1daa185130a9a786c",
+    "rendered_sha256": "8320398ad2b6bb5f6f87c9f1f29175763d09b1f233e09e2d72a28a07d9a73635",
+    "source_commit": "3f6bd041231715184f962cedb33cfbcefa9b5b3d",
+    "source_file_sha256": "4d9de6d6c4c62a2280ec2dbb4cc73dc35c9404df3cb132099ca454f64294b5a2",
+    "source_path": "clients/stratus/configs/diagnosis_agent_prompts.yaml",
+    "substitution_ids": [
+      "remove_direct_kubernetes_enumeration",
+      "remove_stratus_tool_instruction_protocol",
+      "diagnosis_only_evaluation",
+      "remove_mitigation_stage",
+      "remove_downstream_stage_dependency",
+      "replace_orchestrator_submission",
+      "remove_stratus_round_control"
+    ],
+    "template_sha256": "ac5d33e1c37a622776227a984771edfa4d77ee297580592498e33fdd631bfba7"
+  },
+  "readiness_report": {
+    "ready": true,
+    "run_id": "anon_cfcd9a9d50e6910da83ac4d02bc14df7",
+    "signals": [
+      {
+        "checked_at": "2026-09-28T17:36:07.014Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "metrics"
+      },
+      {
+        "checked_at": "2026-09-28T17:36:34.614Z",
+        "evidence": {
+          "count": 1,
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "traces"
+      },
+      {
+        "checked_at": "2026-09-28T17:34:34.170Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "logs"
+      },
+      {
+        "checked_at": "2026-09-28T17:34:34.170Z",
+        "evidence": {
+          "connection_id": "HPEC1vyAAAA",
+          "count": 1,
+          "index": "main",
+          "status_class": "2xx"
+        },
+        "ready": true,
+        "signal": "kubernetes_events"
+      }
+    ]
+  },
+  "requested_model": "gpt-5.6-luna",
+  "requested_reasoning": "medium",
+  "resolved_model": "gpt-5.6-luna",
+  "resolved_reasoning": "medium",
+  "run_id": "anon_cfcd9a9d50e6910da83ac4d02bc14df7",
+  "schema": "sregym.assistant_v3.run_metadata.v1"
+}

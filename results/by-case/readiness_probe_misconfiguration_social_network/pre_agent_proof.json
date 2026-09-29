@@ -1,0 +1,38 @@
+{
+  "case_id": "readiness_probe_misconfiguration_social_network",
+  "causal": {
+    "check_id": "readiness_bad_probe_not_ready_same_pod",
+    "interpretation": "The same new user-service pod specifies the nonexistent /healthz:8080 readiness probe and remains NotReady.",
+    "matched_pod": "user-service-778d884dfb-ttlw2",
+    "signal": "kubernetes_pod_object",
+    "source_count": 1,
+    "splunk_count": 3,
+    "splunk_first_at": "2026-09-27T23:52:57.651000Z",
+    "status": "confirmed",
+    "visibility": "fully_splunk_observable"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_7dbcc7949537f9360652b643b84de600",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-27T23:55:39.561029Z",
+    "start": "2026-09-27T23:52:57.439576Z"
+  }
+}

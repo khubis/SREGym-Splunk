@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "edge_request_filter_cpu_saturation",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "astronomy-shop",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_3e021f7fec4781b0c5df2706d56aca30",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-27T20:53:22.733171Z",
+    "start": "2026-09-27T20:51:14.550581Z"
+  }
+}

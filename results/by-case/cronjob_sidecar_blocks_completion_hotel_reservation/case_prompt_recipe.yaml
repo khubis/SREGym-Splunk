@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: hotel_reservation
+window: runtime_incident_utc
+symptom: A scheduled background task in Hotel Reservation is taking unusually long to finish.
+source_observation: Pre-agent incomplete audit-log-archiver Jobs and their age.

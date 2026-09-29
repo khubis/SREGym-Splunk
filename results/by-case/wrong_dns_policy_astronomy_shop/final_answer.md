@@ -1,0 +1,15 @@
+> **Finding:** A complete failing trace shows one frontend recommendation request reaching `product-catalog` `GetProduct` and receiving gRPC status 13 with the message **“Product Catalog Fail Feature Flag Enabled”** before the error propagated upstream, while bounded connection health shows separate qualified recommendation and `ProductCatalogService` paths failing during the same window.
+
+**Status:** insufficient evidence
+
+**Confidence:** low
+
+**Why this conclusion:** The direct trace proves that `product-catalog` can fail requests because its product-catalog failure feature flag is enabled, and that this error propagates through the frontend recommendation route. The frontend problem period began at **2026-09-28T00:10:10Z** and remained unresolved through the bounded continuation. However, the trace is representative rather than incident-wide proof, the raw labels `product-catalog` and `oteldemo.ProductCatalogService` could not be conclusively joined, and no configuration record established when or why the feature flag changed. An earlier recommendation pod replacement used the same application version and completed roughly 88 seconds before the frontend onset, so it is a weaker alternative rather than an established trigger.
+
+**Impact:** In the supplied window, frontend handled **31,277 requests**, including **466 errors** and **34 root-cause errors**, for an aggregate error rate of **1.4899%**. During the calibrated period, the qualified `oteldemo.RecommendationService` and `oteldemo.ProductCatalogService` paths each showed 100% errors in the available connection-health data; cart and checkout also showed errors.
+
+**Problem period:** **2026-09-28T00:10:10Z–2026-09-28T00:12:50.330Z**; onset established, recovery not observed in the bounded continuation; disposition: correlated mechanism only.
+
+**Caveat:** The trigger of the frontend episode remains unknown.
+
+**Next check:** Run a successful bounded deployment and feature-flag configuration history query to determine whether a feature-flag transition or the earlier recommendation replacement initiated the frontend episode.

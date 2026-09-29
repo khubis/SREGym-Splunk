@@ -1,0 +1,15 @@
+> **Finding:** `oteldemo.CartService` was unavailable on `cart:8080` (`10.100.190.248:8080`), returning gRPC `14 UNAVAILABLE` / `ECONNREFUSED`; the failure propagated through the frontend and caused `/api/cart` HTTP 500 responses. The feature-flag failure scenario is correlated with the outage, but the initiating flag change is not proven.
+
+**Status:** insufficient evidence
+
+**Confidence:** medium
+
+**Why this conclusion:** In the requested window, CartService recorded 58 errors from 61 requests, a 95.08% error rate. Complete traces show the frontend calling CartService, connection attempts being refused on port 8080, and the resulting gRPC failure propagating to frontend and proxy HTTP 500s. Failed CartService traces contain `deployment.scenario=s_otel_feature_flag_cart_failure`, and flagd also showed severe errors, so a feature-flag-driven fault is the leading trigger hypothesis; however, the available flag telemetry was not correlated to the exact failed requests and environment. Kubernetes lifecycle and log checks did not establish a pod, readiness, restart, or deployment transition.
+
+**Impact:** 58 CartService errors out of 61 requests; representative cart requests returned HTTP 500.
+
+**Calibration:** Not calibrated — `2026-09-28T04:59:19.417229Z` through `2026-09-28T05:00:39.869280Z`. Problem onset, recovery, and episode completeness were not established.
+
+**Caveat:** The initiating change that made CartService unavailable is unknown. The feature-flag scenario is strong contextual evidence, not confirmed causation.
+
+**Next check:** Correlate a feature-flag/configuration audit record for `oteldemo.CartService` in `resiligym-interplex_rg-service-tests-s5` with the refused `10.100.190.248:8080` connections during the requested window.

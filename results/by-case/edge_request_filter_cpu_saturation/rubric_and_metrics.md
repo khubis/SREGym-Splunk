@@ -1,0 +1,17 @@
+# Benchmark rubric and this attempt
+
+The [shared benchmark rubric](benchmark_rubric.yaml) scores fault localization (D1), fault characterization (D2), and scope precision (D3), with weights 0.33/0.33/0.34 and a 0.70 pass threshold. A passing score does not necessarily mean the full mechanism was named.
+
+- Benchmark score: **34/100**; judge verdict: `False`
+- D1 Fault Localization: 0.33
+- D2 Fault Characterization: 0.0
+- D3 Scope Precision: 0.67
+- Splunk-visible numeric score: **unverified** (not implemented for this pilot)
+
+## Execution metrics
+
+- Agent runtime: 290.4 s
+- Tokens: 1,852,905
+- Tool calls: 37 (4 failed)
+
+See the [unchanged raw judge result](judge_raw.csv) for every checklist response and critique, and [raw execution metrics](eval_metrics.json) for the measured values.

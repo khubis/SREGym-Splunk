@@ -1,0 +1,27 @@
+{
+  "access_note": "Splunk pod objects demonstrate the split rollout but do not prove PVC ReadWriteOnce mode or PV topology binding. The pre-agent source Kubernetes proof confirmed ReadWriteOnce. Authorized PVC/PV and Deployment inspection, or approved storage-object export, is needed for the complete mechanism.",
+  "evidence": [
+    {
+      "count": 8,
+      "query": "Scoped Splunk Logs connection HPEC1vyAAAA, index main, sourcetype kube:object:pods, run ID and social-network namespace, term jaeger, exact saved UTC incident window; inspect pod object volumes, podAntiAffinity, phase, and creation time.",
+      "samples": [
+        "Running Jaeger replica matched shared claim and hostname anti-affinity.",
+        "Pending Jaeger replica matched shared claim and hostname anti-affinity."
+      ],
+      "signal": "logs",
+      "summary": "Independent post-grade API fetch returned eight matching pod-object rows, with both Running and Pending new Jaeger pods sharing jaeger-pvc under hostname anti-affinity."
+    }
+  ],
+  "expected_root_cause": "Jaeger Deployment replicas share a ReadWriteOnce jaeger-pvc while required hostname anti-affinity spreads them, leaving one pod Pending and reducing rollout readiness.",
+  "expected_root_cause_sha256": "43b8c7a6f8c6b88d2e47f58da111291d4a465ca80e9b3caf58a80d9113796447",
+  "graded_artifact": "duplicate_pvc_mounts_social_network_results.csv",
+  "graded_artifact_sha256": "2b1869201907bb136afdd36bd8caf1844e417a7db3f24fdd5ad44d9bf854ce63",
+  "problem_id": "duplicate_pvc_mounts_social_network",
+  "queried_at": "2026-09-28T22:11:36.273840Z",
+  "schema": "sregym.golden_telemetry_audit.v1",
+  "status": "partial",
+  "window": {
+    "end": "2026-09-28T21:55:25.748907Z",
+    "start": "2026-09-28T21:52:52.706377Z"
+  }
+}

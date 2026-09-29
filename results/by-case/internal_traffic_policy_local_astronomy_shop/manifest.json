@@ -1,0 +1,27 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "7fb1fe1483393f06197e783a1276b087bd17f901864bd3aa44ba5f42dac35bbb",
+    "atif_trace.json": "9a603a2e4a5774304a301cdf0c77fd67cff2704ea19b4748460d1c8527ad166c",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "e558884488b6291236f1cb942bb20070ed1ad0427318aec3b502b0b57bc43bc5",
+    "case_prompt_recipe.yaml": "23fd124a8eb5d304097e4bad0bdf75985cc3825032981b5b68fa17ddd1d69fbf",
+    "delivery_audit.json": "2506edb80880380b4df545deec00600d9eddd2e7e342578a6a3f71e0da9cefad",
+    "eval_metrics.json": "837b89157584bb3aab15bb5ced34f1d27d1a3103878aed29b6a4960197ef73d0",
+    "final_answer.md": "430df4f99590be5619a102face9e27da47a99df1961221dc3c95e7c9c4451070",
+    "judge_raw.csv": "d81eb3a82f4122b9a6fda11bac2c3951c2f75a85b229b7515e0af45d7e37fdc6",
+    "native_trace.jsonl": "3ea59215deb309164cf990682b26ce3cc9d5a6040775343562e58f645a1ad42e",
+    "oracle_source.py": "ef204f029fe75c5a4f85ef0631111f3ae3cc3c8f7e234acfb530a23f0c615f28",
+    "phase_ledger.jsonl": "e73a1805f12d7f859fdf2fe6582e24eca59ddef53e8694924a39e90ea8961176",
+    "postrun_signals.json": "00be8a2e57332029c5c5319cade5c44e780daf6d0c959f0c6d35613c1aea6187",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "a4d95e64c4ff5bfe0b854f5d7390ddc36d5cc4b432660be42ce5fe33d6fc44b7",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "9e969b11cec50e7b221b067c74c5114b91cb0fc54c0911e62633d205db050a77",
+    "proof_amendment.md": "a64327f7a99e8c0534a5763e3b299543b4a11f1c59304a1db74a6eb1efb82073",
+    "run_metadata.json": "a84d4af84e7eb956cf2c1fa339164409ba530184da20362e82993a24eedb90eb"
+  },
+  "benchmark_score": 56.0,
+  "case_id": "internal_traffic_policy_local_astronomy_shop",
+  "original_attempt": "results/0927_2042/assistant_v3/internal_traffic_policy_local_astronomy_shop/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

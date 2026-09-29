@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "namespace_memory_limit",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "hotel-reservation",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_049fb41a2bc039f9894771f022dbcd09",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-28T04:33:47.563618Z",
+    "start": "2026-09-28T04:31:02.704731Z"
+  }
+}

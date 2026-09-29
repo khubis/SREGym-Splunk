@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: social_network
+window: runtime_incident_utc
+symptom: Social Network user-service pods are not becoming ready.
+source_observation: Pre-agent user-service pod Ready conditions.

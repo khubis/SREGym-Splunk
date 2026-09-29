@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: service_wrong_pod_selection_hotel_reservation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/service_wrong_pod_selection_hotel_reservation.py
+candidate_evidence:
+  - fact: "Frontend Service intermittently routes to search pods listening on 8082 rather than 5000"
+    signal: traces
+    query_focus: "frontend request failures correlated with search backend/port"
+  - fact: "service-route=frontend selector includes search pods in frontend Service endpoints"
+    signal: other_kubernetes_api
+    query_focus: "frontend Service spec.selector, EndpointSlice targets, and search pod labels/ports"

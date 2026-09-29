@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "ed93d43fc24451ddeed3fdfd0702cadee8df88020717df99a49893f291d6f4b4",
+    "atif_trace.json": "513c0c45d54faf36613f49ca026f12cd97cbfe112044473df217da291b13d34b",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "62d26b72aff1fdf64ce64ce22b7a3280de734f27337aadd2a04f5fef0c1b7587",
+    "case_prompt_recipe.yaml": "bae2ca1d8e064540c5b52ce13ce97ba64c1b08b30332cf32edc966849a04ab0e",
+    "delivery_audit.json": "3692eb0a51c2e3d3ce7c40e5dcf67cdedd7a9e002c98589769da66e9e8445d57",
+    "eval_metrics.json": "f892fb96122547ab74db5d80f4c30b30f570fe06fdbf77c9046c59385039f1e4",
+    "final_answer.md": "66005687349114a34ff5af7145c3df129b8894f2d39cff2b155fab79985181e5",
+    "judge_raw.csv": "aae00952a001c1ac1685789bad2e6faf40dc39253f24c70d574baaac5473c72e",
+    "native_trace.jsonl": "37a7d931fa62a55c608c9a983ee6a908afc9e8daa1b34219a52fbeea743ef8d4",
+    "oracle_source.py": "d670514ed46270071f994c7a7c3aad15f4d6b2414d4e6f023d74cba9e3282a96",
+    "phase_ledger.jsonl": "792b430570dfaa2be09a13d7b5264755b99f712c637371ebb2289e472eac8020",
+    "postrun_signals.json": "a9853e366d3ffad64442a24137f84ed1a72caf76b35992f6018f82e731385c02",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "b58911c110d1e3979a4b427b4cba4ba2a9a276e0b158f7fbc084eb8f19379344",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "fca0fba95bb554a8d0f640df810be20e97a58d05b9c95409c234f3d310f208f3",
+    "run_metadata.json": "4f303cc2a72c3bda30a1e8b26818ce9484176c91faf21da3519d4b9b5a262954"
+  },
+  "benchmark_score": 23.0,
+  "case_id": "namespace_memory_limit",
+  "original_attempt": "results/0927_2128/assistant_v3/namespace_memory_limit/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

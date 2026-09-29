@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: astronomy_shop
+window: runtime_incident_utc
+symptom: Astronomy Shop frontend requests are failing.
+source_observation: Pre-agent frontend-proxy request errors.

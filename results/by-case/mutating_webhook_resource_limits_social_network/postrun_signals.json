@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "case_id": "mutating_webhook_resource_limits_social_network",
+  "checks": {
+    "events": {
+      "count": 1,
+      "status": "present"
+    },
+    "kubernetes_events": {
+      "count": 1,
+      "status": "present"
+    },
+    "logs": {
+      "count": 1,
+      "status": "present"
+    },
+    "metrics": {
+      "count": 1,
+      "status": "present"
+    },
+    "pods": {
+      "count": 1,
+      "status": "present"
+    },
+    "traces": {
+      "count": 1,
+      "status": "present"
+    }
+  },
+  "logs_connection_id": "HPEC1vyAAAA",
+  "namespace": "social-network",
+  "oracle_evidence": "unverified",
+  "run_id": "anon_b5271ac50a51bd878e26996e298461ed",
+  "schema": "sregym.splunk_lite_delivery.v1",
+  "scope_note": "Representative run-scoped presence checks only; not exhaustive or oracle proof.",
+  "source_comparison": "unverified",
+  "window": {
+    "end": "2026-09-27T22:59:45.421062Z",
+    "start": "2026-09-27T22:57:21.205723Z"
+  }
+}

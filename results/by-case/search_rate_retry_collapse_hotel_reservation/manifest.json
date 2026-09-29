@@ -1,0 +1,27 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "0d842334aa9d7bd071e2a22a3b888998f52615ef3a323c2c14a124a395591714",
+    "atif_trace.json": "a9b2c12f8a5051f938de67e47c7205ff6d73771956708fb4404bfb1b374b5b94",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "1035e3b71764da068fe68cb712e5033e6802347a226810ff7200901104be39cb",
+    "case_prompt_recipe.yaml": "f1c4d75ae80a2a06d5835c9c95cc91ad835e7c761ea00f6ae07aceba3b86bf2e",
+    "delivery_audit.json": "478b3e5b5cc9d43a68f7317ec635cc9383f5d983890b0ec3cd419cb8ca9f00a0",
+    "eval_metrics.json": "cf052c633e3c13e9f3285ec036be247c3425b6c4cda791ddb4199921f632f32b",
+    "final_answer.md": "1db099c9805066b043f237ce3c13a7d143557b65ce324014c706879e25b44955",
+    "judge_raw.csv": "9225f3ae642efffa09cbb9d10481a8919db38a0db8e3bd4dd800284461d8ccef",
+    "native_trace.jsonl": "53be4006244336c060e98ae5373ec3692e33c2551f100bec9c9a0cea22e35464",
+    "oracle_source.py": "60508643da883558b9646dfc01675df9aa7205d6d531a346203621b4ac5ad446",
+    "phase_ledger.jsonl": "7145e071c43a705478d08a2040d51ca0546b79d3ee988249aec7095de614d1dd",
+    "postgrade_golden_telemetry.json": "bdf5e670c5edbf2152729c00388d81cc52f3b8c3f60c1a71063d687692313886",
+    "postrun_signals.json": "3ac6e62601a451834bfdb85f539c5b54ad35dee534e8358b619886872bb9360f",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "192b50b8de13a57282c6161bd57b94b4e099f111192d894dcb7c9ce8b1efd4de",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "b0c2b958abefe541a1b6ddfd3b77d7010f0d2858efa56fbcfd7c6fdd5fc58f69",
+    "run_metadata.json": "141c593e7f3e7e2553b3c43f8fe01b54764c32495b270a13cd28c966b7107c69"
+  },
+  "benchmark_score": 78.0,
+  "case_id": "search_rate_retry_collapse_hotel_reservation",
+  "original_attempt": "results/0928_1513/assistant_v3/search_rate_retry_collapse_hotel_reservation/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}

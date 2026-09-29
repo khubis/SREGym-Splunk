@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: mutating_webhook_resource_limits_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/mutating_webhook_resource_limits.py
+candidate_evidence:
+  - fact: "nginx-thrift admitted pod memory limit is 16Mi and it OOMKills"
+    signal: pods
+    query_focus: "nginx-thrift pod resources.limits.memory and terminated OOMKilled state"
+  - fact: "The active mutating webhook among decoys altered the intended 128Mi/256Mi deployment resources"
+    signal: other_kubernetes_api
+    query_focus: "MutatingWebhookConfiguration rules/selectors and nginx-thrift Deployment template versus pod resources"

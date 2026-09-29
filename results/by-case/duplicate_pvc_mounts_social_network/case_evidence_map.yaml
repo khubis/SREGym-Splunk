@@ -1,0 +1,14 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: duplicate_pvc_mounts_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/duplicate_pvc_mounts.py
+candidate_evidence:
+  - fact: "Jaeger replicas reference one ReadWriteOnce PVC and hostname anti-affinity spreads them"
+    signal: pods
+    query_focus: "jaeger pod spec.volumes persistentVolumeClaim, affinity, and Pending status"
+  - fact: "Only one replica can mount the topology-bound claim, leaving the rollout partially Ready"
+    signal: events
+    query_focus: "jaeger FailedMount or FailedScheduling events and replica status"
+  - fact: "PVC access mode and topology binding require storage object state"
+    signal: other_kubernetes_api
+    query_focus: "PersistentVolumeClaim ReadWriteOnce, bound PersistentVolume topology, and Deployment replica count"

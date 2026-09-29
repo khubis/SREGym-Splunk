@@ -1,0 +1,37 @@
+{
+  "case_id": "edge_request_filter_cpu_saturation",
+  "causal": {
+    "check_id": "edge_slow_pathological_request_filter",
+    "interpretation": "A near-match request repeatedly spends at least one second in the edge request filter.",
+    "signal": "container_logs",
+    "source_count": 85,
+    "source_first_at": "2026-09-27T20:52:14.104687Z",
+    "splunk_count": 27,
+    "splunk_first_at": "2026-09-27T20:52:45.394000Z",
+    "status": "confirmed"
+  },
+  "required_signals": [
+    "metrics",
+    "traces",
+    "logs",
+    "kubernetes_events",
+    "pods",
+    "events"
+  ],
+  "run_id": "anon_3e021f7fec4781b0c5df2706d56aca30",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "events": 1,
+    "kubernetes_events": 1,
+    "logs": 1,
+    "metrics": 1,
+    "pods": 1,
+    "traces": 1
+  },
+  "status": "ready",
+  "window": {
+    "end": "2026-09-27T20:53:22.733171Z",
+    "start": "2026-09-27T20:51:14.550581Z"
+  }
+}

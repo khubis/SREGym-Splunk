@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: wrong_dns_policy_astronomy_shop
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/wrong_dns_policy.py
+candidate_evidence:
+  - fact: "Frontend pod has dnsPolicy None with external resolver 8.8.8.8"
+    signal: pods
+    query_focus: "frontend pod spec.dnsPolicy=None and spec.dnsConfig.nameservers=8.8.8.8"
+  - fact: "DNS resolution failures affect frontend requests"
+    signal: logs
+    query_focus: "frontend DNS errors"

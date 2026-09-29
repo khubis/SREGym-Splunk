@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: network_policy_block
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/network_policy_block.py
+candidate_evidence:
+  - fact: "Recommendation request paths fail or time out while pods stay running"
+    signal: traces
+    query_focus: "recommendation spans and dependent caller errors"
+  - fact: "The exact deny-all-recommendation selector and empty ingress/egress rules are not pod or event objects"
+    signal: other_kubernetes_api
+    query_focus: "NetworkPolicy deny-all-recommendation spec and io.kompose.service=recommendation selector via networking.k8s.io API"

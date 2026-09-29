@@ -1,0 +1,28 @@
+{
+  "access_note": "These Splunk metrics support sustained retry amplification and queue saturation in the exact prompt window. They do not independently expose the runtime retry-policy fields or prove the initial burst; the source injection log supplies that context. The agent localized the rate dependency but did not identify this feedback-loop mechanism.",
+  "evidence": [
+    {
+      "count": 3,
+      "query": "SignalFlow: rate_queue_depth, search_requests_total, search_rate_attempts_total; filter sregym.run.id to this attempt, namespace hotel-reservation, source sregym_prometheus_application; query historical samples inside the saved prompt UTC window.",
+      "samples": [
+        "2026-09-28T22:17:01Z queue=255 external_search=953 search_rate_attempts=2131",
+        "2026-09-28T22:18:01Z queue=255 external_search=1433 search_rate_attempts=3572; interval ratio 1441/480=3.00",
+        "2026-09-28T22:19:01Z queue=256 external_search=1913 search_rate_attempts=5013; interval ratio 1441/480=3.00"
+      ],
+      "signal": "metrics",
+      "summary": "Independent post-grade Splunk API queries show a saturated rate queue and repeated attempts rising three times faster than external search requests across two consecutive one-minute intervals."
+    }
+  ],
+  "expected_root_cause": "A brief burst overloaded the Hotel Reservation search-to-rate dependency; search retries amplified internal rate requests after external traffic returned to baseline, keeping the rate queue saturated and causing persistent errors and latency.",
+  "expected_root_cause_sha256": "73a9c00c0b2cef490f073eea4956feefe998483066cb7a0ffef6e6b6a9a47a76",
+  "graded_artifact": "search_rate_retry_collapse_hotel_reservation_results.csv",
+  "graded_artifact_sha256": "9225f3ae642efffa09cbb9d10481a8919db38a0db8e3bd4dd800284461d8ccef",
+  "problem_id": "search_rate_retry_collapse_hotel_reservation",
+  "queried_at": "2026-09-28T22:32:45.919100Z",
+  "schema": "sregym.golden_telemetry_audit.v1",
+  "status": "partial",
+  "window": {
+    "end": "2026-09-28T22:19:06.567380Z",
+    "start": "2026-09-28T22:16:21.818989Z"
+  }
+}

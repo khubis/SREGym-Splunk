@@ -1,0 +1,30 @@
+{
+  "case_id": "wrong_service_selector_social_network",
+  "causal": {
+    "access_gap": "The Service selector and endpoint set are Kubernetes API objects not exported by the approved pod/event receiver.",
+    "check_id": "user_service_selector_source_and_failed_requests",
+    "interpretation": "The faulty selector and empty endpoints are proven at source; Splunk shows failed workload requests but not the selector mechanism.",
+    "remedy": "Use authorized read-only Kubernetes Service and Endpoints access, or separately approve their telemetry export.",
+    "signal": "container_logs",
+    "source_empty_endpoints": true,
+    "source_selector_confirmed": true,
+    "splunk_failed_response_count": 11,
+    "splunk_first_at": "2026-09-28T17:34:38.775000Z",
+    "status": "symptom_confirmed",
+    "visibility": "requires_additional_access"
+  },
+  "required_signals": [
+    "logs"
+  ],
+  "run_id": "anon_cfcd9a9d50e6910da83ac4d02bc14df7",
+  "schema": "sregym.splunk_lite_pre_agent.v1",
+  "scope_note": "Run-scoped representative delivery plus case-specific causal evidence; not exhaustive telemetry coverage.",
+  "signals": {
+    "logs": 1
+  },
+  "status": "ready_data_limited",
+  "window": {
+    "end": "2026-09-28T17:36:36.116930Z",
+    "start": "2026-09-28T17:34:28.054142Z"
+  }
+}

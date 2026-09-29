@@ -1,0 +1,26 @@
+{
+  "artifact_sha256": {
+    "assistant_terminal.json": "ff84c99cb46118b7837ddb6908d24f2ef4821b3750a646c79448db3952368c99",
+    "atif_trace.json": "e35ae2f616eb8c7aee7c08f7854bcd7e5993e8e4c63427c715c99c5aae0b6ece",
+    "benchmark_rubric.yaml": "4ca6522812892a3263abdc86d184a74c38769a4df0f56c29745fa2f787b10828",
+    "case_evidence_map.yaml": "89e1fb580bb7fe7097cc05e735b9e2eae13126b8b7abf19eaf962cccc6ef039d",
+    "case_prompt_recipe.yaml": "522c7b70c799cb0528507f83089db94f1021b1194720544682450c8fd8b0cc15",
+    "delivery_audit.json": "90fd8af4153a2480fc1c5086fa5bd91dfb0f9ea94496a3f03c746520ee4bed6d",
+    "eval_metrics.json": "3e341010f3f54b6db2ecf8ba1ff74fc0b74ad3dc0b2b6a9a467e09eee0f0c236",
+    "final_answer.md": "180cc9d484c728ec14536b35e2d0377470ebae2ea9856861bbd626ab223fb8af",
+    "judge_raw.csv": "f041ccbe56b2d545d28887fce9ffa2da416fd7b22f3b38760a62a03f57277a8c",
+    "native_trace.jsonl": "8f50ad14c051b71284adb58425f8550f80fd8f793a4fe441c911d1f3cc8927eb",
+    "oracle_source.py": "948362209b465313c8e3798bb602962ff471ac342657ad66c9d3f1877595ccec",
+    "phase_ledger.jsonl": "94ae7acb6641913f4dd8a945ad5a37d7c61086770fec517db6012ff07d698a41",
+    "postrun_signals.json": "25193a2b044cbd64d45ba3640c88b46396caea479aa329a4bef254674a75eed3",
+    "postrun_verifier_source.py": "ac60c5a723440596e35f821a81c77698ba6cd00704063b289ea774a618215370",
+    "pre_agent_proof.json": "e0098a70d99a1ae4e6fa0ec5f1001fd6063b38784a08615b650e629aafb155d2",
+    "pre_agent_verifier_source.py": "f64aaf1461d77e49abd5843035974892b66eec4ccc22c9d3c356b667fa48fd0b",
+    "prompt_request.json": "e1c907ceda9e890ac2d24cf7fbfd8debca8fa6cdfa933b642baa243ec5f5513e",
+    "run_metadata.json": "71ec08dd7f41c33f2fa6b381a339d4fb44a86f9090b0e7b47a13b16263ec0d4f"
+  },
+  "benchmark_score": 100.0,
+  "case_id": "admission_webhook_outage_hotel_reservation",
+  "original_attempt": "results/0927_2303/assistant_v3/admission_webhook_outage_hotel_reservation/run_1",
+  "schema": "sregym.lite_case_dossier.v1"
+}
