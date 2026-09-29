@@ -31,7 +31,15 @@ splunkObservability:
 agent:
   enabled: true
   # The benchmark applications deploy their own node-local OTel agents on
-  # these host ports. This agent only needs file-log collection.
+  # these host ports. Keep this agent's file-log and kubelet-metric collection
+  # while disabling conflicting OTLP listeners.
+  # Kind's kubelet certificate lacks IP SANs, while the chart queries the
+  # kubelet by node IP. Keep service-account authentication, but allow this
+  # local Kind receiver to scrape container CPU metrics despite that cert.
+  config:
+    receivers:
+      kubelet_stats:
+        insecure_skip_verify: true
   ports:
     otlp: null
     otlp-http: null

@@ -246,12 +246,15 @@ class SplunkHttpBackend:
                     f"{kubernetes_filter}, rollup='latest').count().publish(label='kubernetes_metrics')",
                     "data('probe_success', filter="
                     f"{application_filter}, rollup='latest').count().publish(label='application_metrics')",
+                    "data('container_cpu_utilization', filter="
+                    f"{kubernetes_filter}, rollup='latest').count().publish(label='container_cpu_metrics')",
                 )
             )
             values = self._signalflow(program, context.attempt_started_at, checked_at, timeout_seconds)
             return int(
                 values.get("kubernetes_metrics", 0) > 0
                 and values.get("application_metrics", 0) > 0
+                and values.get("container_cpu_metrics", 0) > 0
             )
         if signal == "traces":
             payload = self._query_traces(context, scope, checked_at, timeout_seconds)

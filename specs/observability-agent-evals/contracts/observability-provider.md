@@ -122,7 +122,7 @@ The provider CLI selection is `--observability-provider none|splunk`, default `n
 
 The Splunk implementation must observe, not merely send, all four signals using `run_id`, `ApplicationScope.namespaces`, and `attempt_started_at`:
 
-- `metrics`: at least one run-scoped Kubernetes metric from the provider collector and at least one run-scoped application metric marked `sregym.metric.source=sregym_prometheus_application` are returned.
+- `metrics`: run-scoped Pod-state and container-CPU metrics from the provider collector, plus a run-scoped application `probe_success` metric marked `sregym.metric.source=sregym_prometheus_application`, are returned. This representative gate does not assert every candidate metric family is present.
 - `traces`: at least one application span/trace is returned.
 - `logs`: at least one container-log event is returned through the selected Logs Observer connection.
 - `kubernetes_events`: at least one Kubernetes event record is returned through the selected Logs Observer connection.

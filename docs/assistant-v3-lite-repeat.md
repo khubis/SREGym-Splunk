@@ -7,6 +7,10 @@ It then runs the separate bounded Splunk presence queries and copies the selecte
 attempts into one folder per case. It does **not** change the prompt or agent
 tools. `svelte` plus the reviewed time-window/symptom prompt is a local pilot,
 not an identical leaderboard comparison.
+New attempts require run-scoped Pod-state, application-probe, and container-CPU
+metric series before V3 starts. This catches the Kind kubelet-stats TLS failure
+that older generic metrics checks missed; it does not retroactively validate
+container CPU evidence in already-saved attempts.
 
 ## Credentials and target
 

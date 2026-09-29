@@ -283,6 +283,15 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
         assert set(resources["limits"]) == {"cpu", "memory"}
 
 
+def test_kind_kubelet_stats_cpu_collection_handles_kubelet_ip_certificate():
+    values = yaml.safe_load(Path("sregym/observer/splunk/values.yaml").read_text())
+    # Kind's kubelet certificate has no IP SAN. The existing service-account
+    # auth remains in place; only TLS server verification changes for Kind.
+    assert values["agent"]["config"]["receivers"]["kubelet_stats"] == {
+        "insecure_skip_verify": True,
+    }
+
+
 def test_values_watch_only_approved_kubernetes_objects_once():
     values = yaml.safe_load(Path("sregym/observer/splunk/values.yaml").read_text())
     receiver = values["clusterReceiver"]
@@ -317,6 +326,15 @@ def test_pinned_chart_renders_one_approved_object_pipeline():
         pytest.skip("Pinned Splunk chart repository is not configured")
     assert rendered.returncode == 0, rendered.stderr
     documents = [item for item in yaml.safe_load_all(rendered.stdout) if isinstance(item, dict)]
+    agent_configmap = next(
+        item for item in documents
+        if item.get("kind") == "ConfigMap"
+        and item.get("metadata", {}).get("name") == f"{RELEASE_NAME}-otel-agent"
+    )
+    agent_config = yaml.safe_load(agent_configmap["data"]["relay"])
+    assert agent_config["receivers"]["kubelet_stats"]["auth_type"] == "serviceAccount"
+    assert agent_config["receivers"]["kubelet_stats"]["insecure_skip_verify"] is True
+    assert "kubelet_stats" in agent_config["service"]["pipelines"]["metrics"]["receivers"]
     configmap = next(
         item for item in documents
         if item.get("kind") == "ConfigMap"
@@ -1047,8 +1065,11 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
             "event: metadata",
             'data: {"tsId":"application","properties":{"sf_streamLabel":"application_metrics"}}',
             "",
+            "event: metadata",
+            'data: {"tsId":"cpu","properties":{"sf_streamLabel":"container_cpu_metrics"}}',
+            "",
             "event: data",
-            'data: {"logicalTimestampMs":1,"data":[{"tsId":"kubernetes","value":2},{"tsId":"application","value":13}]}',
+            'data: {"logicalTimestampMs":1,"data":[{"tsId":"kubernetes","value":2},{"tsId":"application","value":13},{"tsId":"cpu","value":7}]}',
             "",
             "event: control-message",
             'data: {"event":"END_OF_CHANNEL","timestampMs":1}',
@@ -1117,6 +1138,7 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     signalflow_program = next(content for operation, _, content in requests if operation == "signalflow")
     assert "k8s.pod.phase" in signalflow_program
     assert "probe_success" in signalflow_program
+    assert "container_cpu_utilization" in signalflow_program
     assert f"filter('sregym.run.id', '{RUN_ID}')" in signalflow_program
     assert "filter('sregym.metric.source', 'sregym_prometheus_application')" in signalflow_program
     assert "filter('namespace', 'social-network')" in signalflow_program
@@ -1142,11 +1164,11 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
 
 
 @pytest.mark.parametrize(
-    "kubernetes_count,application_count,expected",
-    ((1, 1, 1), (1, 0, 0), (0, 1, 0)),
+    "kubernetes_count,application_count,cpu_count,expected",
+    ((1, 1, 1, 1), (1, 0, 1, 0), (0, 1, 1, 0), (1, 1, 0, 0)),
 )
-def test_http_backend_requires_both_kubernetes_and_application_metrics(
-    kubernetes_count, application_count, expected
+def test_http_backend_requires_kubernetes_application_and_container_cpu_metrics(
+    kubernetes_count, application_count, cpu_count, expected
 ):
     sse = "\n".join(
         (
@@ -1156,6 +1178,9 @@ def test_http_backend_requires_both_kubernetes_and_application_metrics(
             "event: metadata",
             'data: {"tsId":"application","properties":{"sf_streamLabel":"application_metrics"}}',
             "",
+            "event: metadata",
+            'data: {"tsId":"cpu","properties":{"sf_streamLabel":"container_cpu_metrics"}}',
+            "",
             "event: data",
             "data: "
             + json.dumps(
@@ -1164,6 +1189,7 @@ def test_http_backend_requires_both_kubernetes_and_application_metrics(
                     "data": [
                         {"tsId": "kubernetes", "value": kubernetes_count},
                         {"tsId": "application", "value": application_count},
+                        {"tsId": "cpu", "value": cpu_count},
                     ],
                 }
             ),
