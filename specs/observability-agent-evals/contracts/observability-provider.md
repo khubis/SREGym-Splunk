@@ -56,6 +56,7 @@ class DeliveryReport:
     queue_final_size: dict[SignalName, int | None]
     drained: bool
     valid: bool
+    queue_drain_minimum: dict[SignalName, int | None] | None = None  # post-quiescence, ingestion-complete interval
 ```
 
 Provider methods:
@@ -125,6 +126,8 @@ The Splunk implementation must observe, not merely send, all four signals using 
 - `traces`: at least one application span/trace is returned.
 - `logs`: at least one container-log event is returned through the selected Logs Observer connection.
 - `kubernetes_events`: at least one Kubernetes event record is returned through the selected Logs Observer connection.
+
+For the complete-Lite campaign, the pinned chart's `k8sObjects` list is explicitly limited to `pods` and `events` in watch mode. The chart's separate `k8s_events` receiver is disabled; Kubernetes-event readiness therefore queries `sourcetype="kube:object:events"` rather than the former `k8s.event.reason` field. Both object kinds use the existing `logs/objects` HEC pipeline and the explicitly selected Logs Observer connection. The chart's inherited cluster-metrics RBAC may mention other resource types but is not an object-export allowlist. Pod/event body values are never included in committed case contracts or sanitized proof artifacts.
 
 Polling has one overall configurable deadline with a documented default, a bounded attempt count, exponential backoff with jitter, and a per-request timeout. HTTP 408/429/5xx and connect/read timeouts are transient. Malformed configuration and HTTP 400/401/403 are terminal. A deadline with any missing signal raises a typed provider error carrying a secret-free `ReadinessReport`.
 

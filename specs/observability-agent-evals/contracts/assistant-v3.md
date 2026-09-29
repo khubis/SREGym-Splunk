@@ -41,14 +41,14 @@ X-Request-ID: <UUID derived deterministically from the anonymous run id>
 ```json
 {
   "prompt": "<exact rendered immutable profile>",
-  "action_instructions": "Telemetry time window: <started_at> through <ended_at>, inclusive. Investigate using only telemetry within this time window.",
+  "action_instructions": "Telemetry time window: <started_at> through <ended_at>, inclusive. Investigate using only telemetry within this time window.<optional versioned symptom sentence>",
   "session_id": null,
   "model": "<AGENT_MODEL_ID>",
   "reasoning": "<AGENT_REASONING_EFFORT>"
 }
 ```
 
-`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. It contains only the inclusive UTC start and end timestamps plus a direction to stay within them. It contains no run identity, namespace, canonical problem ID, fault, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL. Assistant tools are not modified or constrained to use an internal run identity.
+`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. The baseline profile contains only the inclusive UTC start and end timestamps plus a direction to stay within them. The separately named symptom-guided exploratory profile appends exactly one reviewed user-observable symptom, with its independent source recorded in the public case recipe; it is not prompt-parity-comparable. Neither profile contains a run identity, namespace, canonical problem ID, mechanism, fix, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL. Assistant tools are not modified or constrained to use an internal run identity. The driver persists the exact selected profile, instructions, and rendered hash before execution, without requiring a manual preview stop for every case.
 
 ## Stream Handling
 

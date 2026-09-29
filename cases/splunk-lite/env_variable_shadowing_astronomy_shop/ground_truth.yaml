@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: env_variable_shadowing_astronomy_shop
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/env_variable_shadowing.py
+candidate_evidence:
+  - fact: "Frontend-proxy has two ordered FRONTEND_HOST entries; later localhost shadows frontend"
+    signal: pods
+    query_focus: "frontend-proxy pod spec.containers.env ordered FRONTEND_HOST entries"
+  - fact: "Frontend proxy behavior changes after the environment update"
+    signal: logs
+    query_focus: "frontend-proxy startup and request logs"

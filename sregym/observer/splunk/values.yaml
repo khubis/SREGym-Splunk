@@ -48,7 +48,16 @@ agent:
 
 clusterReceiver:
   enabled: true
-  eventsEnabled: true
+  # The object receiver provides the single Kubernetes-event log stream.
+  # Disable the chart's separate k8s_events receiver to avoid duplicates.
+  eventsEnabled: false
+  # Match the approved shared-EKS object scope. Override chart defaults that
+  # would otherwise pull NetworkPolicies and CRDs every six hours.
+  k8sObjects:
+    - name: pods
+      mode: watch
+    - name: events
+      mode: watch
   resources:
     requests:
       cpu: 50m
@@ -56,6 +65,12 @@ clusterReceiver:
     limits:
       cpu: 300m
       memory: 512Mi
+
+rbac:
+  customRules:
+    - apiGroups: [""]
+      resources: [pods, events]
+      verbs: [get, list, watch]
 
 # Keep benchmark application logs while avoiding unrelated harness and
 # collector history on the long-lived kind nodes.

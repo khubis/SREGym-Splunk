@@ -4,6 +4,15 @@ This workflow runs the existing Assistant v3 product surface against SREGym-Lite
 
 Use `--profile full` for comparable results. `--profile svelte` is useful for a lower-cost smoke test, but its persisted `comparable` value is `false` and it must not be compared with full-profile results.
 
+## One case, Lite suite, or the full registry
+
+For a small, safety-gated and resumable local Assistant V3 pilot that also
+assembles per-case evidence, use the [Lite repeat wrapper](assistant-v3-lite-repeat.md).
+
+`main.py` is the suite runner; one command can run multiple cases sequentially. `--problem <case-id>` runs one case. `--suite sregym-lite` selects the 21 ordered Lite IDs in `sregym/conductor/problem_sets.py`. With neither selector, the runner uses `sregym/conductor/tasklist.yml` if present, otherwise the entire registered problem set; that broader selection is not a guaranteed laptop-sized or Kind-compatible suite. `--stages diagnosis` limits work to RCA; the default attempts every stage a problem supports. `--n-attempts N` repeats each case, and `--resume <previous-results.csv>` skips completed slots, provided the original CSV still exists. A missing or unreadable resume CSV is currently logged as a warning and the runner continues without those completed slots, so verify the path before launching a repeat campaign.
+
+The ordinary SREGym stack deploys Prometheus, Loki, and Jaeger and waits for application/infrastructure readiness, but it does not perform the case-specific source-to-store evidence checks described here. With `--observability-provider splunk`, the runner adds a four-signal query-readiness gate before V3 and a collector-delivery audit before teardown. The additional 21 case-specific source/Splunk causal checks currently run only for `--agent assistant_v3 --observability-provider splunk --assistant-prompt-arm symptom_guided`; they are evaluator-side checks and do not reveal the oracle to V3. The representative six-class post-run query is a separate command below, not part of the one-command suite lifecycle. Therefore the native suite command runs, judges, and checkpoints the cases, but does **not yet** produce the complete final by-case review package without follow-up steps.
+
 ## Prerequisites
 
 Start from the repository root on a machine that meets the [SREGym-Lite requirements](SREGym-Lite.md): Python 3.12 or newer, Docker, KIND, `kubectl`, Helm 4 or newer, `uv`, at least 8 vCPU, 16 GB memory, and 100 GB disk. Initialize the application submodule and Python environment, create the KIND cluster, and confirm its nodes are ready:
@@ -17,7 +26,7 @@ docker info >/dev/null
 helm version --short
 ```
 
-The Assistant URL must be reachable from the isolated agent container. The Splunk org must have an accessible Logs Observer connection. Set `SPLUNK_LOGS_CONNECTION_ID` when the HEC destination is not the org's default connection; otherwise, the provider selects the accessible default connection, or the first accessible connection when no default exists. Do not add connection, service, scenario, or time-window hints to the model prompt.
+The Assistant URL can be a local v3 server in a separate Assistant checkout (`make run-local-server-v3`, port 8903); it need not be an externally supplied deployment URL. The runner rewrites a loopback Assistant URL for its isolated agent container. Start that server with `SYNTHETIC_SF_TOKEN`, `SYNTHETIC_REALM`, `SYNTHETIC_ORG_ID`, and `SYNTHETIC_USER_ID` mapped to `SF_TOKEN`, `SFX_REALM`, `ORG_ID`, and `USER_ID`, respectively. Use a dedicated local `POSTGRES_DATABASE` for evals so an older Assistant development schema cannot break preflight. Derive the runner bearer credential from the server's generated local-auth JWT without printing it. The Splunk org must have an accessible Logs Observer connection. Set `SPLUNK_LOGS_CONNECTION_ID` when the HEC destination is not the org's default connection; otherwise, the provider selects the accessible default connection, or the first accessible connection when no default exists. Do not add connection, service, scenario, or run-ID hints to the model prompt; the approved time-window instruction is separate.
 
 Keep credentials in the process environment or a gitignored local `.env`. The runner does not automatically source `.env`; review it and load it in the shell before running commands. Never commit it or print its contents.
 
@@ -39,7 +48,7 @@ Keep credentials in the process environment or a gitignored local `.env`. The ru
 
 Choose one fixed judge model for the campaign and expose its identifier as the non-secret shell variable `JUDGE_MODEL`. Keep this value and `--judge-backend` unchanged across results being compared.
 
-The commands below use `--force-build` so the container includes this checkout's Assistant adapter and observability integration. Docker reuses unchanged build layers after the first build.
+The commands below use `--force-build` so the container includes this checkout's Assistant adapter and observability integration. Docker reuses unchanged build layers while their cache remains. After one successful local build, later runs may replace `--force-build` with `--agent-image sregym-agent-base:latest` to reuse that exact local image without rebuilding; verify its image ID first and rebuild after changing containerized code. Omitting both flags selects SREGym's published image, which does not contain this fork's Assistant driver. Never combine the two flags.
 
 ## Preflight
 
@@ -247,6 +256,7 @@ summary = {
             "enqueue_failed_delta",
             "queue_high_water",
             "queue_final_size",
+            "queue_drain_minimum",
         )
     },
     "judge": {
@@ -290,7 +300,7 @@ For a comparable valid attempt, verify all of the following:
 - intended requested/resolved agent model and reasoning plus the fixed judge model/backend;
 - one non-empty diagnosis, `terminal_outcome: completed`, and exactly one submission in `terminal.json`;
 - four ready signals in both the opening and closing reports;
-- `delivery.valid: true`, zero send/enqueue failure deltas, `drained: true`, and zero final queue sizes;
+- `delivery.valid: true`, zero send/enqueue failure deltas, and `drained: true` (either zero final queue sizes or zero post-workload-stop queue minima; collector self-metrics may create a new in-flight point after a drain);
 - a plausible non-negative first-visible lag for every signal; and
 - a populated `Diagnosis.success`/judge result in the per-attempt CSV.
 
@@ -309,3 +319,63 @@ For a comparable valid attempt, verify all of the following:
 | Artifact publication failure | Inspect the reported `.runtime` staging path. Do not delete it until the partial evidence is understood. |
 
 Do not repair a failed run by editing its scenario, oracle, prompt, profile label, or artifacts. Fix the infrastructure/configuration and create or resume a new attempt so the original evidence remains auditable.
+
+## Complete-Lite evidence campaign (work in progress)
+
+`cases/splunk-lite/<case-id>/` now contains one public `prompt.yaml` recipe and one separate oracle-side `ground_truth.yaml` for every registered Lite case. These evidence maps are **candidates**, explicitly marked `pending_live_verification`; do not interpret them as confirmed Splunk-visible ground truth. The baseline recipe preserves `sregym-stratus-diagnosis-v1` and adds only the actual incident UTC window in the separate execution instruction. No run ID, scenario name, or oracle detail belongs in the Assistant prompt. An optional symptom hint would be a different, non-parity prompt profile and is not part of this baseline.
+
+After an attempt has produced `run_metadata.json` and `assistant_v3/request.json`, run the common bounded delivery check (substitute the actual attempt directory):
+
+```sh
+set -a
+source "${ASSISTANT_REPO:?Set ASSISTANT_REPO}/.env"
+set +a
+export SF_TOKEN="$SYNTHETIC_SF_TOKEN"
+export SPLUNK_O11Y_INGEST_TOKEN="$SYNTHETIC_SPLUNK_ACCESS_TOKEN"
+export SFX_REALM="$SYNTHETIC_REALM"
+export SPLUNK_LOGS_CONNECTION_ID='<your-accessible-logs-connection-id>'
+export SPLUNK_HEC_INDEX=main
+uv run python -m sregym.results.splunk_lite_evidence --run-dir /absolute/path/to/attempt
+```
+
+The command checks the saved UTC window, prompt profile, and Logs connection before querying six representative run-scoped signal classes. It writes `splunk_lite_delivery.json` atomically inside the attempt and records only statuses/counts, not event bodies or credentials. Rerun `checkpoint_attempt` after it so the scorecard links the proof. `missing` is a query result; `query_error` is not evidence of absence. Even six `present` statuses do **not** prove that root-cause telemetry or every source signal reached Splunk: source-versus-destination and each case's oracle evidence still need separate post-grade review. The original benchmark judge score remains authoritative and unchanged.
+
+For metrics, the post-run verifier compensates for the Splunk backend's two-minute SignalFlow ingest-lag guard so the *actual* historical query ends at the prompt's UTC end. Without that offset, incidents shorter than two minutes produced a false `missing` even when opening and closing collector audits were green. The original false-missing proofs remain only in the older raw-run archive in macOS Trash; the active by-case folders retain the corrected checks and their limitation notes.
+
+The live, case-specific source-to-Splunk checks are reusable Python code in `sregym/results/splunk_lite_causal.py`, dispatched by `_assistant_case_preflight` in `main.py`. Their regression fixtures are in `tests/results/test_splunk_lite_causal.py` and `tests/test_main_campaign_abort.py`. Run them with `uv run pytest -q tests/results/test_splunk_lite_causal.py tests/test_main_campaign_abort.py`. Each benchmark attempt calls its reviewed check after fault injection and generic collector readiness, before V3 launches. The checker queries only the scoped Kind source and synthetic Splunk connection for the saved incident window; the sanitized `splunk_lite_pre_agent.json` records the check ID, source/Splunk counts, visibility classification, and exact UTC window. The raw query bodies and credentials are not persisted. A new simulation is required to rerun a live source comparison after teardown; the post-run six-class delivery command above can be rerun against retained Splunk data within retention. A case without a reviewed executable checker fails closed and must not receive a score. These checks are representative causal evidence, not a claim of exhaustive metric/log/trace parity.
+
+For the current resource-limited pilot, run one case at a time after sourcing the private `.env` and mapping the `SYNTHETIC_*` values to `SF_TOKEN`, `SFX_REALM`, `ORG_ID`, `USER_ID`, and `SPLUNK_O11Y_INGEST_TOKEN` (do not print or commit values). The exact repeatable invocation is:
+
+```sh
+uv run main.py --problem <case-id> --stages diagnosis --profile svelte \
+  --agent assistant_v3 --model gpt-5.6-luna --reasoning-effort medium \
+  --judge-model azure/gpt-5.6-luna --judge-backend api \
+  --observability-provider splunk --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --assistant-prompt-arm symptom_guided --agent-image sregym-agent-base:latest
+```
+
+This invocation automatically performs the source/Splunk case check and records its proof. If that check fails, preserve the incomplete attempt, fix the checker or telemetry path with a regression test, and launch a fresh attempt; never attach a score to the failed one. The earlier full-profile suite command is a separate, future comparability target, not the command used for these `svelte` pilot results.
+
+After one single-case smoke passes, the same pilot configuration can run all 21 Lite cases sequentially with one runner command (start Assistant V3 and complete the environment/preflight steps above first):
+
+```sh
+uv run main.py --suite sregym-lite --stages diagnosis --profile svelte \
+  --agent assistant_v3 --model gpt-5.6-luna --reasoning-effort medium \
+  --judge-model azure/gpt-5.6-luna --judge-backend api \
+  --observability-provider splunk --allow-agent-endpoint "$ASSISTANT_V3_URL" \
+  --assistant-prompt-arm symptom_guided --agent-image sregym-agent-base:latest
+```
+
+Do not run this and the single-case command concurrently on the same Kind cluster. The suite checkpoints each terminal attempt and stops on an untrustworthy case evidence gate or failed cleanup; inspect the precise failure before resuming. A successful runner exit still does not imply that the separate post-run six-class checks and by-case export have been completed.
+
+The verifier retries an empty asynchronous Splunk search up to three times before recording it as missing. The first CronJob smoke on 2026-09-26 showed why: its first APM search poll returned zero, its second returned a trace. The run's exact 4,012-character prompt is in `assistant_v3/request.json`; a hand-copied paraphrase is not an authoritative prompt artifact.
+
+The Splunk chart now watches pod and event objects only and uses one HEC object-log pipeline; the former event receiver is disabled to avoid duplicate event export. Its query checks use `sourcetype="kube:object:pods"` and `sourcetype="kube:object:events"` in the explicitly selected Logs connection. Offline rendered-chart tests and one collector-only live pod/event smoke passed; sanitized query proof is at `results/collector-smokes/pod-event-watch-2026-09-26.json`. That smoke does not prove a complete Lite incident or source-to-destination parity. Check host memory, disk, credentials, and per-case evidence gates before any rerun. Resource-reduced local runs remain non-comparable.
+
+The checkpointed 2026-09-27–28 first-pass campaign report is `results/assistant-v3-lite-pilot-2026-09-27.md`, with one valid scored attempt for each of 21 cases and per-case links to exact answers, judge critiques, native/ATIF traces, derived metrics, source/Splunk causal proofs, and representative delivery checks. Earlier pre-agent failures were excluded and their raw attempts moved to macOS Trash; only fresh attempts passing the corrected checks count. The `results/` directory is local and Git-ignored; preserve or export it before removing this worktree.
+
+For case-by-case review, use the canonical local `results/by-case/<case-id>/` dossiers. They were built from the original raw runs and verified before the numbered run folders were moved to macOS Trash. The consolidated report now links directly to them. For a future campaign, run `python -m sregym.results.lite_case_dossiers --report <raw-campaign-report> --output <case-output>` **before** removing its raw run folders; this older campaign cannot be rebuilt from its rewritten, by-case-only report.
+
+Each folder has a readable view of the exact saved starter prompt, the canonical benchmark oracle source expression, a separately labeled Splunk-visible evidence assessment, the rubric and execution metrics, and verified copies of the selected answer, native/ATIF traces, raw judge CSV, phase ledger, terminal submission, and delivery proofs. A local manifest records original source paths and SHA-256 hashes; its historical `original_attempt` path no longer exists under `results/` because those run folders were moved to Trash. The builder checks for one completed delivery-valid attempt, matching case IDs, report/judge score, and exact answer/judge submission before publishing; it does not alter raw traces. Most cases have a pre-agent causal proof but **not** an independent post-grade golden-telemetry audit, and no case has a verified separate numeric Splunk-visible score. The generated dossiers are Git-ignored; preserve or export them before removing the worktree.
+
+Start with each folder's `verification.md` to see, in plain language, the provider-readiness checks, the case-specific pre-agent RCA clue and its saved source/Splunk result, and the post-run metrics/traces/logs/Kubernetes-object presence checks. The executable checkers are shared across cases in `sregym/results/splunk_lite_causal.py` and `sregym/results/splunk_lite_evidence.py`; each dossier contains current source snapshots (`pre_agent_verifier_source.py`, `postrun_verifier_source.py`) alongside its saved run-time JSON proof (`pre_agent_proof.json`, `postrun_signals.json`, `delivery_audit.json`). The snapshots are for code inspection or rerunning, **not** proof of the exact historical source version: these attempts did not save a verifier-source hash when they ran. Presence checks and collector-drain status do not prove complete source-to-Splunk delivery or that every oracle clue was available. The walkthrough explicitly separates confirmed checks from unverified candidate clues.

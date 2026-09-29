@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: edge_request_filter_cpu_saturation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/edge_request_filter_cpu_saturation.py
+candidate_evidence:
+  - fact: "Frontend proxy CPU and request-filter impact coincide"
+    signal: metrics
+    query_focus: "frontend-proxy CPU and request outcome metrics"
+  - fact: "The WAF regex causes catastrophic backtracking on a near-match request"
+    signal: logs
+    query_focus: "frontend-proxy request_filter_eval log with regex ^([a-zA-Z]+)*$, candidate length, and elapsed time"

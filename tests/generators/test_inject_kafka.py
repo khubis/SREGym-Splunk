@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import sregym.generators.fault.inject_kafka as inject_kafka
 from sregym.generators.fault.inject_kafka import (
     CONSUMER_SCRIPT,
     PRODUCER_SCRIPT,
@@ -83,3 +84,26 @@ def test_recovery_resets_inactive_group_without_patching_consumer_template():
         ("scale", 1),
         ("ready", "orders-validator"),
     ]
+
+
+def test_topic_creation_retries_broker_election_race(monkeypatch):
+    broker = KafkaBrokerClient(_RecordingKubeCtl(), "astronomy-shop")
+    calls = []
+    sleeps = []
+
+    def run(script, args):
+        calls.append((script, args))
+        if "--create" in args and len([item for item in calls if "--create" in item[1]]) == 1:
+            raise RuntimeError(
+                "InvalidReplicationFactorException: All brokers are currently fenced "
+                "or in controlled shutdown"
+            )
+        return ""
+
+    monkeypatch.setattr(broker, "_run", run)
+    monkeypatch.setattr(inject_kafka.time, "sleep", sleeps.append)
+
+    broker.recreate_topic("orders-fulfillment")
+
+    assert len([item for item in calls if "--create" in item[1]]) == 2
+    assert sleeps == [2, 2]

@@ -97,6 +97,7 @@ class DriverRunConfig:
     logs_connection_id: str | None = None
     attempt_started_at: datetime | None = None
     telemetry_window_ended_at: datetime | None = None
+    symptom: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -133,6 +134,7 @@ class DriverRunConfig:
                     if isinstance(payload.get("telemetry_window_ended_at"), str)
                     else None
                 ),
+                symptom=payload.get("symptom"),
             )
         except (KeyError, TypeError, ValueError):
             raise ArtifactError("Assistant driver configuration is incomplete") from None
@@ -145,8 +147,16 @@ class DriverRunConfig:
             raise ArtifactError("attempt number must be positive")
         if self.benchmark_profile not in {"full", "svelte"}:
             raise ArtifactError("benchmark profile must be full or svelte")
-        if self.comparable != (self.benchmark_profile == "full"):
-            raise ArtifactError("only the full benchmark profile is comparable")
+        if self.comparable and (self.benchmark_profile != "full" or self.symptom is not None):
+            raise ArtifactError("only a full, time-only baseline is comparable")
+        if self.symptom is not None and (
+            not isinstance(self.symptom, str)
+            or not self.symptom.strip()
+            or self.symptom != self.symptom.strip()
+            or len(self.symptom) > 200
+            or "\n" in self.symptom
+        ):
+            raise ArtifactError("symptom must be one short, non-empty line")
         if not self.judge_model.strip() or not self.judge_backend.strip():
             raise ArtifactError("judge model and backend must be explicit")
         if self.readiness_report is not None and self.readiness_report.run_id != self.run_id:
@@ -254,6 +264,7 @@ class AssistantRequest:
     requested_model: str
     requested_reasoning: str
     action_instructions: str | None = None
+    action_profile_id: str | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
@@ -287,6 +298,8 @@ class AssistantRequest:
         }
         if self.action_instructions is not None:
             result["action_instructions"] = self.action_instructions
+        if self.action_profile_id is not None:
+            result["action_profile_id"] = self.action_profile_id
         return result
 
 
@@ -355,6 +368,7 @@ class AssistantRunMetadata:
     agent_started_at: datetime | None
     agent_ended_at: datetime | None
     classification: TerminalOutcome
+    telemetry_scope_warning: str | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
@@ -378,6 +392,13 @@ class AssistantRunMetadata:
             raise ArtifactError("run metadata has invalid resolved reasoning")
         if self.classification not in _TERMINAL_OUTCOMES:
             raise ArtifactError("run metadata has invalid classification")
+        if self.telemetry_scope_warning is not None and (
+            self.comparable or self.telemetry_scope_warning not in {
+                "Assistant tool trace queried telemetry before the provided time window",
+                "Assistant tool trace queried telemetry after the provided time window",
+            }
+        ):
+            raise ArtifactError("run metadata has an invalid telemetry scope warning")
         timestamps = tuple(
             value
             for value in (self.attempt_started_at, self.agent_started_at, self.agent_ended_at)
@@ -421,6 +442,10 @@ class AssistantRunMetadata:
             "agent_started_at": self.agent_started_at,
             "agent_ended_at": self.agent_ended_at,
             "classification": classification,
+            **(
+                {"telemetry_scope_warning": self.telemetry_scope_warning}
+                if self.telemetry_scope_warning is not None else {}
+            ),
             "included_in_diagnosis_pass_rate": classification
             not in {"infrastructure_invalid", "telemetry_scope_violation"},
         }
@@ -786,13 +811,23 @@ def _format_utc(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="auto").replace("+00:00", "Z")
 
 
-def _build_action_instructions(window_started_at: datetime, window_ended_at: datetime) -> str:
-    return (
+def _build_action_instructions(
+    window_started_at: datetime,
+    window_ended_at: datetime,
+    *,
+    symptom: str | None = None,
+) -> str:
+    instructions = (
         f"Telemetry time window: {_format_utc(window_started_at)} through "
         f"{_format_utc(window_ended_at)}, inclusive. Investigate using only telemetry within this "
         "time window. If telemetry is unavailable in this window, report that instead of using "
         "data outside it."
     )
+    if symptom is None:
+        return instructions
+    if not symptom.strip() or symptom != symptom.strip() or len(symptom) > 200 or "\n" in symptom:
+        raise ArtifactError("symptom must be one short, non-empty line")
+    return f"{instructions}\nObserved symptom: {symptom}"
 
 
 def _walk_values(value: Any) -> Iterable[tuple[str | None, Any]]:
@@ -864,6 +899,7 @@ def execute_assistant_attempt(
     session_id: str | None = None
     retry_count = 0
     failure: AssistantFailure | None = None
+    scope_warning: str | None = None
     terminal: AssistantTerminal
     try:
         conductor.require_diagnosis()
@@ -874,6 +910,7 @@ def execute_assistant_attempt(
         action_instructions = _build_action_instructions(
             window_started_at,
             window_ended_at,
+            symptom=config.symptom,
         )
         result = assistant.run_session(
             prompt=rendered.text,
@@ -889,7 +926,7 @@ def execute_assistant_attempt(
             window_started_at=window_started_at,
             window_ended_at=window_ended_at,
         )
-        if scope_failure is not None:
+        if scope_failure is not None and config.comparable:
             terminal = AssistantTerminal(
                 outcome="telemetry_scope_violation",
                 session_id=session_id,
@@ -908,6 +945,10 @@ def execute_assistant_attempt(
                 cleanup_status="pending",
             )
         else:
+            # The operator-guided pilot intentionally retains and grades the
+            # final answer even when the agent drifts outside its instructed
+            # window. Preserve the drift as provenance, not a silent pass.
+            scope_warning = scope_failure
             try:
                 conductor.submit_diagnosis(result.final_text)
             except (ConductorError, httpx.HTTPError):
@@ -992,6 +1033,7 @@ def execute_assistant_attempt(
         action_instructions = _build_action_instructions(
             window_started_at,
             window_ended_at,
+            symptom=config.symptom,
         )
     request = AssistantRequest(
         run_id=config.run_id,
@@ -999,6 +1041,7 @@ def execute_assistant_attempt(
         requested_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
         action_instructions=action_instructions,
+        action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
     )
     metadata = AssistantRunMetadata(
         run_id=config.run_id,
@@ -1024,6 +1067,7 @@ def execute_assistant_attempt(
         agent_started_at=started_at,
         agent_ended_at=ended_at,
         classification=terminal.outcome,
+        telemetry_scope_warning=scope_warning,
     )
     write_result = AssistantArtifactStore(
         config.artifacts_root,
@@ -1127,6 +1171,7 @@ def write_pre_agent_failure(
                 prompt=rendered,
                 requested_model=assistant_configuration.model,
                 requested_reasoning=assistant_configuration.reasoning,
+                action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
             ),
             events=(),
             terminal=terminal,

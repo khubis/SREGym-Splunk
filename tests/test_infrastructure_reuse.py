@@ -183,7 +183,8 @@ def test_observer_setup_forwards_only_configured_external_export(startup, extern
         startup.otel_collector.deploy.assert_called_once_with(external_export)
 
 
-def test_application_trace_redirect_is_ready_before_workload_starts(conductor, monkeypatch):
+@pytest.mark.parametrize("preserve_fault_target", [False, True])
+def test_application_trace_redirect_is_ready_before_workload_starts(conductor, monkeypatch, preserve_fault_target):
     events = []
     app = SimpleNamespace(
         name="Hotel Reservation",
@@ -195,6 +196,7 @@ def test_application_trace_redirect_is_ready_before_workload_starts(conductor, m
         app=app,
         requires_khaos=lambda: False,
         run_default_workload=True,
+        preserve_app_local_jaeger_deployment=preserve_fault_target,
     )
     conductor._baseline_captured = True
     conductor.config = SimpleNamespace(deploy_loki=True)
@@ -224,7 +226,10 @@ def test_application_trace_redirect_is_ready_before_workload_starts(conductor, m
     ]
     assert app_events == [
         "app-deploy",
-        ("trace-redirect", "hotel-reservation", {"restart_deployments": True}),
+        ("trace-redirect", "hotel-reservation", {
+            "restart_deployments": True,
+            **({"preserve_deployments": True} if preserve_fault_target else {}),
+        }),
         ("ready", "hotel-reservation"),
         "workload-start",
     ]

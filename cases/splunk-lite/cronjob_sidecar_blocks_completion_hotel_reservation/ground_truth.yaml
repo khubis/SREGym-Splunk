@@ -1,0 +1,14 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: cronjob_sidecar_blocks_completion_hotel_reservation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/cronjob_sidecar_blocks_completion.py
+candidate_evidence:
+  - fact: "Active audit-log-archiver jobs accumulate while success stays zero"
+    signal: metrics
+    query_focus: "kube_job_status_active and kube_job_status_succeeded for audit-log-archiver"
+  - fact: "Archiver exits while fluent-bit-sidecar stays running in the same job pod"
+    signal: pods
+    query_focus: "audit-log-archiver pod containerStatuses and spec.containers"
+  - fact: "The CronJob template itself places fluent-bit-sidecar under regular containers"
+    signal: other_kubernetes_api
+    query_focus: "CronJob audit-log-archiver jobTemplate spec.containers versus initContainers"

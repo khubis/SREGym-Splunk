@@ -210,7 +210,12 @@ def test_driver_config_records_opaque_identity_and_comparability_without_secrets
             for offset, signal in enumerate(("metrics", "traces", "logs", "kubernetes_events"), start=1)
         ),
     )
-    conductor = SimpleNamespace(observability_readiness=readiness, _observability_context=context)
+    conductor = SimpleNamespace(
+        observability_readiness=readiness,
+        _observability_context=context,
+        incident_started_at=started_at + timedelta(seconds=2),
+        incident_ended_at=started_at + timedelta(minutes=3),
+    )
     provider = SimpleNamespace(
         name="splunk",
         configuration=SimpleNamespace(hec_index="main", hec_token="hec-secret"),
@@ -225,10 +230,636 @@ def test_driver_config_records_opaque_identity_and_comparability_without_secrets
     assert payload["benchmark_profile"] == "svelte"
     assert payload["comparable"] is False
     assert payload["judge_model"] == "fixed-judge"
-    assert payload["attempt_started_at"] == "2026-09-24T12:00:00Z"
-    assert payload["telemetry_window_ended_at"] == "2026-09-24T12:00:04Z"
+    assert payload["attempt_started_at"] == "2026-09-24T12:00:02Z"
+    assert payload["telemetry_window_ended_at"] == "2026-09-24T12:03:00Z"
     assert "real-problem-id" not in json.dumps(payload)
     assert "hec-secret" not in json.dumps(payload)
+
+
+def test_symptom_guided_config_uses_case_recipe_and_is_not_prompt_comparable(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    monkeypatch.setattr(benchmark_main, "get_profile", lambda: "full")
+    monkeypatch.setenv("JUDGE_MODEL_ID", "fixed-judge")
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef", attempt=1, active_dir=tmp_path)
+    conductor = SimpleNamespace(
+        problem_id="cronjob_sidecar_blocks_completion_hotel_reservation",
+        observability_readiness=None,
+        _observability_context=SimpleNamespace(attempt_started_at=datetime(2026, 9, 26, tzinfo=UTC)),
+        incident_started_at=datetime(2026, 9, 26, 1, tzinfo=UTC),
+    )
+    provider = SimpleNamespace(name="splunk", configuration=SimpleNamespace(hec_index="main"))
+
+    config = benchmark_main._assistant_driver_config(
+        run, conductor, "v3", provider, "api", prompt_arm="symptom_guided",
+    )
+
+    assert config.symptom == (
+        "A scheduled background task in Hotel Reservation is taking unusually long to finish."
+    )
+    assert config.attempt_started_at == conductor.incident_started_at
+    assert config.comparable is False
+
+
+def test_case_preflight_uses_post_baseline_window_and_exact_synthetic_connection(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    end = start + timedelta(minutes=5)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef", active_dir=tmp_path)
+    conductor = SimpleNamespace(
+        problem_id="cronjob_sidecar_blocks_completion_hotel_reservation",
+        incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation", namespaces=["hotel-reservation"]),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs-connection")
+    observed = {}
+
+    class Backend:
+        def __init__(self, config):
+            assert config is provider.configuration
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", Backend)
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: [])
+
+    def wait(backend, **kwargs):
+        observed.update(kwargs)
+        return {"status": "ready", "window": {"start": start.isoformat().replace("+00:00", "Z"),
+                                              "end": end.isoformat().replace("+00:00", "Z")}}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_cronjob_pre_agent", wait)
+    result = benchmark_main._assistant_case_preflight(run, conductor, provider)
+    assert result["status"] == "ready"
+    assert observed["context"].run_id == run.artifact_id
+    assert observed["context"].attempt_started_at == start
+    assert observed["connection_id"] == "synthetic-logs-connection"
+    assert observed["scope"].namespaces == ("hotel-reservation",)
+    assert observed["closed"] is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_edge_case_preflight_uses_bounded_source_logs_not_cronjob_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="edge_request_filter_cpu_saturation", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_logs", lambda *a, **k: observed.update(
+        namespace=a[0], workload=a[1], start=k["start"], context=k["context"],
+    ) or ["source-event"])
+
+    def edge_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ["source-event"]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_edge_pre_agent", edge_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider) == {"status": "ready"}
+    assert observed == {
+        "namespace": "astronomy-shop", "workload": "frontend-proxy", "start": start, "context": "kind-kind",
+    }
+
+
+def test_network_policy_preflight_reads_policy_only_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="network_policy_block", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.update(
+        kind=a[0], name=a[1], namespace=k["namespace"], context=k["context"],
+    ) or {"kind": "NetworkPolicy"})
+
+    def network_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == {"kind": "NetworkPolicy"}
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_network_policy_pre_agent", network_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == {
+        "kind": "networkpolicy", "name": "deny-all-recommendation",
+        "namespace": "hotel-reservation", "context": "kind-kind",
+    }
+
+
+def test_kafka_preflight_reads_validator_logs_from_source_only_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="kafka_poison_pill_hol_block", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_logs", lambda *a, **k: observed.update(
+        namespace=a[0], deployment=a[1], context=k["context"], start=k["start"],
+    ) or ["source validator log"])
+
+    def kafka_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ["source validator log"]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_kafka_pre_agent", kafka_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready"
+    assert observed == {
+        "namespace": "astronomy-shop", "deployment": "orders-validator",
+        "context": "kind-kind", "start": start,
+    }
+
+
+def test_mutating_webhook_preflight_reads_social_network_pods_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="mutating_webhook_resource_limits_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.update(
+        namespace=a[0], context=k["context"],
+    ) or [{"kind": "Pod"}])
+
+    def webhook_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == [{"kind": "Pod"}]
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_mutating_webhook_pre_agent", webhook_wait, raising=False)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == {"namespace": "social-network", "context": "kind-kind"}
+
+
+def test_finalizer_deadlock_preflight_reads_controller_logs_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="finalizer_deadlock_controller_hotel_reservation", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_logs", lambda *a, **k: observed.update(
+        namespace=a[0], deployment=a[1], context=k["context"], start=k["start"],
+    ) or ["source denial log"])
+
+    def finalizer_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ["source denial log"]
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_finalizer_deadlock_pre_agent", finalizer_wait, raising=False)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == {
+        "namespace": "hotel-reservation", "deployment": "cleanup-controller",
+        "context": "kind-kind", "start": start,
+    }
+
+
+def test_readiness_preflight_reads_social_network_pods_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="readiness_probe_misconfiguration_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.update(
+        namespace=a[0], context=k["context"],
+    ) or [{"kind": "Pod"}])
+
+    def readiness_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == [{"kind": "Pod"}]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_readiness_pre_agent", readiness_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready"
+    assert observed == {"namespace": "social-network", "context": "kind-kind"}
+
+
+def test_env_shadowing_preflight_reads_astronomy_pods_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="env_variable_shadowing_astronomy_shop", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.update(
+        namespace=a[0], context=k["context"],
+    ) or [{"kind": "Pod"}])
+
+    def shadowing_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == [{"kind": "Pod"}]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_env_shadowing_pre_agent", shadowing_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready"
+    assert observed == {"namespace": "astronomy-shop", "context": "kind-kind"}
+
+
+def test_internal_traffic_preflight_reads_source_service_and_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="internal_traffic_policy_local_astronomy_shop", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "Service"})
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def traffic_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "Service"}, [{"kind": "Pod"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_internal_traffic_policy_pre_agent", traffic_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("service", "recommendation"), {"namespace": "astronomy-shop", "context": "kind-kind"}),
+        (("astronomy-shop",), {"context": "kind-kind"}),
+    ]
+
+
+def test_service_dns_preflight_reads_only_source_coredns_configmap(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="service_dns_resolution_failure_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "ConfigMap"})
+
+    def dns_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == {"kind": "ConfigMap"}
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_service_dns_pre_agent", dns_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("configmap", "coredns"), {"namespace": "kube-system", "context": "kind-kind"}),
+    ]
+
+
+def test_wrong_pod_selection_preflight_reads_source_frontend_service_and_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="service_wrong_pod_selection_hotel_reservation", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "Service"})
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def selection_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "Service"}, [{"kind": "Pod"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_service_wrong_pod_selection_pre_agent", selection_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("service", "frontend"), {"namespace": "hotel-reservation", "context": "kind-kind"}),
+        (("hotel-reservation",), {"context": "kind-kind"}),
+    ]
+
+
+def test_namespace_memory_preflight_reads_quota_and_events(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="namespace_memory_limit", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "ResourceQuota"})
+    monkeypatch.setattr(benchmark_main, "read_source_events", lambda *a, **k: observed.append((a, k)) or [{"kind": "Event"}])
+
+    def quota_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "ResourceQuota"}, [{"kind": "Event"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_namespace_memory_quota_pre_agent", quota_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("resourcequota", "memory-limit-quota"), {"namespace": "hotel-reservation", "context": "kind-kind"}),
+        (("hotel-reservation",), {"context": "kind-kind"}),
+    ]
+
+
+def test_valkey_auth_preflight_reads_astronomy_cart_logs(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="valkey_auth_disruption", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_logs", lambda *a, **k: observed.append((a, k)) or ["auth error"])
+
+    def auth_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ["auth error"]
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_valkey_auth_pre_agent", auth_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("astronomy-shop", "cart"), {"context": "kind-kind", "start": start}),
+    ]
+
+
+def test_secret_rotation_preflight_reads_deployment_and_pods_without_secret(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="secret_rotation_stale_env_credentials_astronomy_shop", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "Deployment"})
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def rotation_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "Deployment"}, [{"kind": "Pod"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_secret_rotation_pre_agent", rotation_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("deployment", "product-catalog"), {"namespace": "astronomy-shop", "context": "kind-kind"}),
+        (("astronomy-shop",), {"context": "kind-kind"}),
+    ]
+
+
+def test_unschedulable_checkout_preflight_reads_astronomy_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="unschedulable_incorrect_port_assignment", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def checkout_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == [{"kind": "Pod"}]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_unschedulable_checkout_pre_agent", checkout_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready"
+    assert observed == [(("astronomy-shop",), {"context": "kind-kind"})]
+
+
+def test_duplicate_pvc_preflight_reads_jaeger_pvc_and_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="duplicate_pvc_mounts_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "PersistentVolumeClaim"})
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def pvc_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "PersistentVolumeClaim"}, [{"kind": "Pod"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_duplicate_pvc_mounts_pre_agent", pvc_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("persistentvolumeclaim", "jaeger-pvc"), {"namespace": "social-network", "context": "kind-kind"}),
+        (("social-network",), {"context": "kind-kind"}),
+    ]
+
+
+def test_admission_webhook_preflight_reads_cluster_webhook_and_namespace_events(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="admission_webhook_outage_hotel_reservation", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_cluster_object", lambda *a, **k: observed.append((a, k)) or {"kind": "ValidatingWebhookConfiguration"})
+    monkeypatch.setattr(benchmark_main, "read_source_events", lambda *a, **k: observed.append((a, k)) or [{"kind": "Event"}])
+
+    def webhook_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "ValidatingWebhookConfiguration"}, [{"kind": "Event"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_admission_webhook_pre_agent", webhook_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("validatingwebhookconfiguration", "pod-policy.validation.k8s.io"), {"context": "kind-kind"}),
+        (("hotel-reservation",), {"context": "kind-kind"}),
+    ]
+
+
+def test_wrong_dns_policy_preflight_reads_astronomy_pods_for_runner_side_proof(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="wrong_dns_policy_astronomy_shop", incident_started_at=start,
+        app=SimpleNamespace(app_name="Astronomy Shop", namespace="astronomy-shop"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = {}
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.update(
+        namespace=a[0], context=k["context"],
+    ) or [{"kind": "Pod"}])
+
+    def dns_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == [{"kind": "Pod"}]
+        return {"status": "ready"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_wrong_dns_policy_pre_agent", dns_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready"
+    assert observed == {"namespace": "astronomy-shop", "context": "kind-kind"}
+
+
+def test_wrong_service_selector_preflight_reads_exact_service_and_endpoints(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="wrong_service_selector_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": a[0]})
+
+    def selector_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "service"}, {"kind": "endpoints"})
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_wrong_service_selector_pre_agent", selector_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("service", "user-service"), {"namespace": "social-network", "context": "kind-kind"}),
+        (("endpoints", "user-service"), {"namespace": "social-network", "context": "kind-kind"}),
+    ]
+
+
+def test_rolling_update_preflight_reads_source_strategy_and_pods(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="rolling_update_misconfigured_social_network", incident_started_at=start,
+        app=SimpleNamespace(app_name="Social Network", namespace="social-network"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    observed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(benchmark_main, "read_source_object", lambda *a, **k: observed.append((a, k)) or {"kind": "Deployment"})
+    monkeypatch.setattr(benchmark_main, "read_source_pods", lambda *a, **k: observed.append((a, k)) or [{"kind": "Pod"}])
+
+    def rolling_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == ({"kind": "Deployment"}, [{"kind": "Pod"}])
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_rolling_update_pre_agent", rolling_wait)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+    assert observed == [
+        (("deployment", "custom-service"), {"namespace": "social-network", "context": "kind-kind"}),
+        (("social-network",), {"context": "kind-kind"}),
+    ]
+
+
+def test_search_retry_preflight_reads_live_source_metrics_without_exposing_oracle(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    source = {"rate_queue_depth": 42, "search_requests_total": 900,
+              "search_rate_attempts_total": 1600}
+    conductor = SimpleNamespace(
+        problem_id="search_rate_retry_collapse_hotel_reservation", incident_started_at=start,
+        app=SimpleNamespace(app_name="Hotel Reservation", namespace="hotel-reservation"),
+        problem=SimpleNamespace(workload=SimpleNamespace(metrics=SimpleNamespace(snapshot=lambda: source))),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs")
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: None))
+
+    def search_wait(backend, **kwargs):
+        assert kwargs["source_reader"]() == source
+        return {"status": "ready_data_limited"}
+
+    monkeypatch.setattr(benchmark_main, "wait_for_search_retry_pre_agent", search_wait, raising=False)
+    assert benchmark_main._assistant_case_preflight(run, conductor, provider)["status"] == "ready_data_limited"
+
+
+def test_case_preflight_fails_closed_for_unreviewed_case_or_non_kind_context(monkeypatch):
+    benchmark_main = _load_main_module()
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(problem_id="unreviewed_lite_case")
+    with pytest.raises(benchmark_main.CaseGateError, match="no reviewed"):
+        benchmark_main._assistant_case_preflight(run, conductor, object())
+
+    conductor = SimpleNamespace(
+        problem_id="cronjob_sidecar_blocks_completion_hotel_reservation",
+        incident_started_at=datetime(2026, 9, 26, 19, tzinfo=UTC),
+        app=SimpleNamespace(namespace="hotel-reservation", app_name="Hotel Reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs-connection")
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="prod\n"))
+    with pytest.raises(benchmark_main.CaseGateError, match="Kind"):
+        benchmark_main._assistant_case_preflight(run, conductor, provider)
+
+
+def test_case_preflight_redacts_unexpected_backend_errors_and_closes_backend(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = SimpleNamespace(artifact_id="anon_0123456789abcdef0123456789abcdef")
+    conductor = SimpleNamespace(
+        problem_id="cronjob_sidecar_blocks_completion_hotel_reservation",
+        incident_started_at=start,
+        app=SimpleNamespace(namespace="hotel-reservation", app_name="Hotel Reservation"),
+    )
+    provider = SimpleNamespace(configuration=object(), _connection_id="synthetic-logs-connection")
+    closed = []
+    monkeypatch.setattr(benchmark_main.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="kind-kind\n"))
+    monkeypatch.setattr(benchmark_main, "SplunkHttpBackend", lambda _: SimpleNamespace(close=lambda: closed.append(True)))
+    monkeypatch.setattr(benchmark_main, "wait_for_cronjob_pre_agent", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("credential-like-private-error")
+    ))
+    with pytest.raises(benchmark_main.CaseGateError, match="verifier failed") as raised:
+        benchmark_main._assistant_case_preflight(run, conductor, provider)
+    assert "credential-like-private-error" not in str(raised.value)
+    assert closed == [True]
 
 
 def test_assistant_preflight_forwards_only_assistant_credentials(monkeypatch):
@@ -273,6 +904,28 @@ def test_assistant_prompt_context_requires_an_application_and_uses_public_metada
         "app_description": "Demo application",
         "app_namespace": "otel-demo",
     }
+
+
+def test_assistant_inspection_preview_uses_exact_runtime_window(monkeypatch):
+    benchmark_main = _load_main_module()
+    start = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
+    end = datetime(2026, 9, 26, 18, 5, tzinfo=UTC)
+    monkeypatch.setattr(
+        benchmark_main,
+        "_assistant_driver_config",
+        Mock(return_value=SimpleNamespace(attempt_started_at=start, telemetry_window_ended_at=end, symptom=None)),
+    )
+    monkeypatch.setattr(
+        benchmark_main,
+        "_assistant_prompt_context",
+        Mock(return_value={"app_name": "Hotel Reservation", "app_description": "Demo", "app_namespace": "hotel-reservation"}),
+    )
+
+    prompt, instruction = benchmark_main._assistant_inspection_preview(object(), object(), object(), "api")
+
+    assert "Hotel Reservation" in prompt
+    assert "Telemetry time window: 2026-09-26T18:00:00Z through 2026-09-26T18:05:00Z" in instruction
+    assert "run ID" not in instruction
 
 
 def test_driver_requires_an_agent_without_external_harness(monkeypatch, tmp_path):
@@ -402,7 +1055,7 @@ def test_successful_assistant_attempt_configures_agent_and_finalizes_artifacts(m
         observability_provider=provider,
     )
 
-    write_config.assert_called_once_with(run, conductor, "v3", provider, "api")
+    write_config.assert_called_once_with(run, conductor, "v3", provider, "api", prompt_arm="time_only")
     assert registration.kickoff_env == {"EXISTING": "value", "ASSISTANT": "configured"}
     launcher.ensure_started.assert_awaited_once_with(registration)
     write_failure.assert_called_once()
@@ -412,6 +1065,97 @@ def test_successful_assistant_attempt_configures_agent_and_finalizes_artifacts(m
     assert row["comparable"] is True
     checkpoint.assert_called_once()
     assert checkpoint.call_args.args[1] == published_run
+
+
+def test_guided_case_gate_freezes_window_then_publishes_proof_after_agent_cleanup(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    conductor = _driver_conductor(start_result=benchmark_main.StartProblemResult.SUCCESS)
+    conductor.problem_id = "cronjob_sidecar_blocks_completion_hotel_reservation"
+    conductor.problems.get_problem_ids.side_effect = lambda all=False: [conductor.problem_id]
+    conductor.incident_started_at = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    run = _fake_run(tmp_path)
+    published_run = tmp_path / "results" / "batch" / "assistant_v3" / conductor.problem_id / "run_1"
+    published_run.mkdir(parents=True)
+    run.finalize_and_publish.return_value = published_run
+    launcher = _configure_driver_test(benchmark_main, monkeypatch, tmp_path, conductor, run)
+    registration = SimpleNamespace(agent_version="v3", kickoff_env={})
+    monkeypatch.setattr(benchmark_main, "get_agent", Mock(return_value=registration))
+    monkeypatch.setattr(benchmark_main, "_write_assistant_driver_config", Mock())
+    monkeypatch.setattr(benchmark_main, "_assistant_runtime_environment", lambda: {})
+    monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=object()))
+    monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
+    monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", Mock())
+    monkeypatch.setattr(benchmark_main, "finalize_attempt_artifacts", Mock())
+    monkeypatch.setattr(benchmark_main.trace_postprocess, "write_trajectory", Mock(return_value=None))
+    monkeypatch.setattr(benchmark_main, "checkpoint_assistant_attempt", Mock())
+    monkeypatch.setattr(benchmark_main.AssistantV3Config, "from_env", Mock(return_value=object()))
+    proof = {
+        "schema": "sregym.splunk_lite_pre_agent.v1", "status": "ready",
+        "case_id": conductor.problem_id, "run_id": run.artifact_id,
+        "window": {"start": "2026-09-26T19:00:00Z", "end": "2026-09-26T19:05:00Z"},
+    }
+    gate = Mock(return_value=proof)
+    monkeypatch.setattr(benchmark_main, "_assistant_case_preflight", gate)
+    monkeypatch.setattr(benchmark_main.asyncio, "to_thread", AsyncMock(side_effect=lambda fn, *a: fn(*a)))
+    write_proof = benchmark_main.atomic_write_campaign
+
+    def checked_write(path, payload):
+        assert launcher.cleanup_agent.called
+        write_proof(path, payload)
+
+    monkeypatch.setattr(benchmark_main, "atomic_write_campaign", checked_write)
+
+    benchmark_main.driver_loop(
+        conductor, problem_selection=[conductor.problem_id], agent_to_run="assistant_v3",
+        observability_provider=SimpleNamespace(name="splunk"), assistant_prompt_arm="symptom_guided",
+    )
+    gate.assert_called_once()
+    launcher.ensure_started.assert_awaited_once()
+    assert conductor.incident_ended_at == datetime(2026, 9, 26, 19, 5, tzinfo=UTC)
+    assert not (run.active_dir / "splunk_lite_pre_agent.json").exists()
+    assert json.loads((published_run / "splunk_lite_pre_agent.json").read_text()) == proof
+
+
+def test_guided_case_gate_failure_records_unscored_attempt_and_never_launches_agent(monkeypatch, tmp_path):
+    benchmark_main = _load_main_module()
+    conductor = _driver_conductor(start_result=benchmark_main.StartProblemResult.SUCCESS)
+    conductor.problem_id = "cronjob_sidecar_blocks_completion_hotel_reservation"
+    conductor.problems.get_problem_ids.side_effect = lambda all=False: [conductor.problem_id]
+    conductor.incident_started_at = datetime(2026, 9, 26, 19, tzinfo=UTC)
+    conductor.finalize_attempt_status.return_value = "incomplete"
+    conductor.record_incomplete_attempt.side_effect = lambda reason: conductor.results.update({
+        "run_status": "incomplete", "incomplete_reason": reason,
+    })
+    run = _fake_run(tmp_path)
+    launcher = _configure_driver_test(benchmark_main, monkeypatch, tmp_path, conductor, run)
+    published = tmp_path / "published"
+    published.mkdir()
+    run.finalize_and_publish.return_value = published
+    monkeypatch.setattr(benchmark_main, "_assistant_case_preflight", Mock(side_effect=benchmark_main.CaseGateError(
+        "pre-agent evidence did not become ready", {"status": "missing_causal_telemetry"},
+    )))
+    monkeypatch.setattr(benchmark_main.asyncio, "to_thread", AsyncMock(side_effect=lambda fn, *a: fn(*a)))
+    monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=object()))
+    monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
+    monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", Mock())
+    monkeypatch.setattr(benchmark_main, "finalize_attempt_artifacts", Mock())
+    monkeypatch.setattr(benchmark_main.trace_postprocess, "write_trajectory", Mock(return_value=None))
+    checkpoint = Mock()
+    monkeypatch.setattr(benchmark_main, "checkpoint_assistant_attempt", checkpoint)
+    monkeypatch.setattr(benchmark_main.AssistantV3Config, "from_env", Mock(return_value=object()))
+
+    with pytest.raises(benchmark_main.BenchmarkCampaignAborted, match="not trustworthy"):
+        benchmark_main.driver_loop(
+            conductor, problem_selection=[conductor.problem_id], agent_to_run="assistant_v3",
+            observability_provider=SimpleNamespace(name="splunk"), assistant_prompt_arm="symptom_guided",
+        )
+    launcher.ensure_started.assert_not_awaited()
+    conductor.finish_problem_in_background.assert_called()
+    assert conductor.results["infrastructure_invalid"] is True
+    assert conductor.results["incomplete_reason"] == "pre_agent_evidence_failed"
+    assert not (run.active_dir / "splunk_lite_pre_agent.json").exists()
+    assert json.loads((published / "splunk_lite_pre_agent.json").read_text())["status"] == "missing_causal_telemetry"
+    checkpoint.assert_called_once()
 
 
 def test_inspection_gate_waits_after_readiness_before_starting_assistant(monkeypatch, tmp_path):
@@ -425,6 +1169,7 @@ def test_inspection_gate_waits_after_readiness_before_starting_assistant(monkeyp
     monkeypatch.setattr(benchmark_main, "_assistant_runtime_environment", lambda: {})
     monkeypatch.setattr(benchmark_main, "_assistant_driver_config", Mock(return_value=object()))
     monkeypatch.setattr(benchmark_main, "_assistant_prompt_context", Mock(return_value={}))
+    monkeypatch.setattr(benchmark_main, "_assistant_inspection_preview", Mock(return_value=("prompt", "window")))
     monkeypatch.setattr(benchmark_main, "write_pre_agent_failure", Mock())
     monkeypatch.setattr(benchmark_main, "finalize_attempt_artifacts", Mock())
     monkeypatch.setattr(benchmark_main.trace_postprocess, "write_trajectory", Mock(return_value=None))
@@ -502,6 +1247,19 @@ def test_cli_help_builds_the_observability_provider_option(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "--observability-provider {none,splunk}" in output
     assert "--inspect-before-agent" in output
+    assert "--agent-image" in output
+
+
+def test_agent_image_selection_reuses_explicit_local_image_without_rebuild():
+    benchmark_main = _load_main_module()
+
+    assert benchmark_main.resolve_agent_image(
+        "sregym-agent-base:latest", judge_image=None, force_build=False
+    ) == ("sregym-agent-base:latest", False)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        benchmark_main.resolve_agent_image("sregym-agent-base:latest", judge_image=None, force_build=True)
+    with pytest.raises(ValueError, match="judge bridge"):
+        benchmark_main.resolve_agent_image("sregym-agent-base:latest", judge_image="bridge-image", force_build=False)
 
 
 @pytest.mark.parametrize("platform_failure, expected_attempts", [(True, 1), (False, 3)])

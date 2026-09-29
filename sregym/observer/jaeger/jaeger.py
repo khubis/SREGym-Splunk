@@ -64,26 +64,34 @@ class Jaeger:
                 time.sleep(3)
         raise RuntimeError(f"Service {service} not found within {timeout}s")
 
-    def create_external_name_service(self, namespace: str, *, restart_deployments: bool = False):
-        """Replace all app-local Jaeger deployments and services with ExternalName
-        services that redirect traffic to the centralized Jaeger in the observe namespace.
+    def create_external_name_service(
+        self,
+        namespace: str,
+        *,
+        restart_deployments: bool = False,
+        preserve_deployments: bool = False,
+    ):
+        """Redirect trace services to the collector, normally removing local Jaeger.
 
         This ensures traces flow to the shared observability stack regardless of
         whether the app uses the Jaeger agent protocol (port 6831) or OTLP (port 4317).
         Applications redirected after deployment must restart before traffic begins;
         Jaeger clients can otherwise retain the removed Service's resolved address.
+        Preserve the local workload only when a benchmark fault explicitly targets
+        that Deployment; its Services are still redirected for Splunk trace export.
         """
-        # Delete app-local Jaeger workloads across the labels and conventional
-        # names used by the benchmark applications.
-        for resource in ["deployment", "statefulset"]:
-            for selector in ("app-name=jaeger", "app=jaeger", "io.kompose.service=jaeger"):
+        if not preserve_deployments:
+            # Delete app-local Jaeger workloads across the labels and conventional
+            # names used by the benchmark applications.
+            for resource in ["deployment", "statefulset"]:
+                for selector in ("app-name=jaeger", "app=jaeger", "io.kompose.service=jaeger"):
+                    self.run_cmd(
+                        f"kubectl delete {resource} -n {namespace} -l {selector} --ignore-not-found"
+                    )
                 self.run_cmd(
-                    f"kubectl delete {resource} -n {namespace} -l {selector} --ignore-not-found"
+                    f"kubectl delete {resource} -n {namespace} "
+                    "jaeger jaeger-agent jaeger-collector jaeger-query --ignore-not-found"
                 )
-            self.run_cmd(
-                f"kubectl delete {resource} -n {namespace} "
-                "jaeger jaeger-agent jaeger-collector jaeger-query --ignore-not-found"
-            )
 
         # All jaeger service names that apps might reference.
         # Route through OTel Collector so traces are converted to span metrics.

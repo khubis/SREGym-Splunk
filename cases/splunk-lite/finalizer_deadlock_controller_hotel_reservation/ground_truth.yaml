@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: finalizer_deadlock_controller_hotel_reservation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/finalizer_deadlock_controller.py
+candidate_evidence:
+  - fact: "cleanup-controller logs a 403 when trying to finish reservation-cleanup-token deletion"
+    signal: logs
+    query_focus: "cleanup-controller ConfigMap Terminating cleanup attempt and HTTP 403"
+  - fact: "ConfigMap cleanup.reservations.io/pending-cleanup finalizer remains and ClusterRole lacks patch"
+    signal: other_kubernetes_api
+    query_focus: "ConfigMap reservation-cleanup-token finalizers and ClusterRole configmap-cleanup-controller verbs"

@@ -1,5 +1,10 @@
 def resume_row_is_complete(row: dict[str, str]) -> bool:
     """Return whether a prior CSV row satisfies one requested attempt."""
+    if any(
+        str(row.get(field, "")).strip().lower() in {"true", "1", "yes"}
+        for field in ("infrastructure_invalid", "artifact_finalization_failed", "cleanup_failed")
+    ) or str(row.get("included_in_diagnosis_pass_rate", "")).strip().lower() in {"false", "0", "no"}:
+        return False
     run_status = str(row.get("run_status", "")).strip().lower()
     if run_status:
         return run_status == "complete"

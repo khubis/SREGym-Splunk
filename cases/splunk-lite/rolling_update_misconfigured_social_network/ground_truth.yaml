@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: rolling_update_misconfigured_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/rolling_update_misconfigured.py
+candidate_evidence:
+  - fact: "custom-service old replicas drain while new pods stall in an init container"
+    signal: pods
+    query_focus: "custom-service pod initContainerStatuses, generations, and Ready condition"
+  - fact: "Deployment strategy maxUnavailable=100% and maxSurge=0 turns a stalled init container into full outage"
+    signal: other_kubernetes_api
+    query_focus: "custom-service Deployment spec.strategy.rollingUpdate"

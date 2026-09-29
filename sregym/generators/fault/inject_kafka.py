@@ -10,8 +10,8 @@ from kubernetes import client
 
 from sregym.generators.fault.base import FaultInjector
 from sregym.service.kubectl import KubeCtl
-from sregym.service.runtime_images import KAFKA_CLIENT_IMAGE
 from sregym.service.rollout import deployment_rollout_complete
+from sregym.service.runtime_images import KAFKA_CLIENT_IMAGE
 
 logger = logging.getLogger("all.sregym.inject_kafka")
 logger.propagate = True
@@ -250,7 +250,15 @@ class KafkaBrokerClient:
                 )
                 return
             except RuntimeError as exc:
-                if "already exists" not in str(exc) and "marked for deletion" not in str(exc):
+                retryable = (
+                    "already exists" in str(exc)
+                    or "marked for deletion" in str(exc)
+                    or (
+                        "InvalidReplicationFactorException" in str(exc)
+                        and "All brokers are currently fenced or in controlled shutdown" in str(exc)
+                    )
+                )
+                if not retryable:
                     raise
                 time.sleep(2)
         raise TimeoutError(f"Kafka topic {topic!r} was not recreated within 60 seconds")

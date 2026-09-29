@@ -24,7 +24,7 @@ The chart is configured from committed non-secret values plus a pre-created Kube
 
 Before Assistant starts, the provider waits for collector rollout and polls Splunk for one metric, trace, container log, and Kubernetes event matching the opaque identity and attempt time window. It uses the same Splunk access context and resolves the Logs Observer connection with Assistant's rule: accessible default first, otherwise first accessible connection. Success produces a per-signal readiness report; any missing signal yields `infrastructure_invalid` and prevents `AgentLauncher.ensure_started`. Transport 429/5xx/timeouts retry with bounded exponential backoff and jitter; 400/401/403 fail immediately. No readiness check invokes an LLM (R3, R6, R7).
 
-At attempt end, the provider takes a second end-to-end snapshot, reads the collector's sent/send-failed/enqueue-failed/queue-size counters, and waits for queues to drain within a fixed deadline before teardown. A delivery report records first-visible lag per signal, counter deltas, queue high-water/final size, and drain status. Any exporter/enqueue failure, missing closing signal, or undrained queue marks the attempt infrastructure-invalid for diagnosis-rate aggregation while preserving the Assistant and judge artifacts. This gives a strong bounded delivery guarantee without claiming record-for-record completeness (R3, R5, R6, R7).
+At attempt end, the provider takes a second end-to-end snapshot, reads the collector's sent/send-failed/enqueue-failed/queue-size counters, and waits for queues to drain within a fixed deadline before teardown. Since the collector continuously exports its own metrics, a latest one-minute sample may show one in-flight point even when the queue emptied between scrapes. A separate bounded queue-minimum query starts after workload quiescence and uses only ingestion-complete data; an observed zero for each exporter proves a drain without accepting an earlier zero. The delivery report records first-visible lag per signal, counter deltas, queue high-water/final size, post-stop minima, and drain status. Any exporter/enqueue failure, missing closing signal, or queue never observed empty after quiescence marks the attempt infrastructure-invalid for diagnosis-rate aggregation while preserving the Assistant and judge artifacts. This is a bounded delivery check, not record-for-record completeness (R3, R5, R6, R7).
 
 ### 3. Register Assistant v3 as an ordinary SRE Gym agent
 
@@ -65,11 +65,38 @@ Reuse the existing opaque run identity only for harness-level delivery verificat
 
 After Assistant completes and before `/submit`, scan recorded tool calls for explicit absolute timestamps outside that window. Reject such attempts as `telemetry_scope_violation`, preserve their artifacts, and exclude them from diagnosis scoring. Do not reject foreign run identifiers in tool output. Then run the first ten entries of `SREGYM_LITE_PROBLEMS` once each, sequentially, using the existing resume and reporting paths (R10).
 
-### 8. Persist batch progress and verify golden telemetry after grading
+### 8. Persist batch progress and separate pre-agent proof from post-grade interpretation
 
-After every terminal attempt, append one fsynced JSONL progress record and atomically regenerate a concise Markdown scorecard from published artifacts. Each row contains status, score, verdict/rationale, golden-telemetry status, and relative links to the raw final answer, full judge result, trajectory, and audit. Startup/resume rebuilds the same files, ignoring only a truncated final JSONL line, so a crash cannot erase earlier cases (R11).
+After every terminal attempt, append one fsynced JSONL progress record and atomically regenerate a concise Markdown scorecard from published artifacts. Each row contains status, the unchanged benchmark score/verdict/rationale, a separately labeled Splunk-visible score or `unverified`, golden-telemetry status, access gap/remedy, and relative links to exact request, raw final answer, both raw judge outputs, native/normalized traces, scripted proof, and delivery audit. Startup/resume rebuilds the same files, ignoring only a truncated final JSONL line, so a crash cannot erase earlier cases (R11).
 
-After the answer is graded, a trusted operator-side verifier reads the problem oracle and incident window, runs narrow Splunk queries for the injected component/mechanism/impact, and saves only sanitized queries, counts, timestamps, and a `confirmed|partial|missing|not_checked` conclusion. This audit never runs before grading, never enters the Assistant prompt/session, and never changes the score. The ten local cases run sequentially under the svelte profile and remain explicitly non-comparable; full-profile comparison runs require a larger host (R1, R11).
+The trusted case verifier may use oracle-side checks **before** Assistant starts to prove that the needed observations are in the source and Splunk. It retains sanitized queries, counts, timestamps, and status in runner memory while Assistant runs; the run directory is mounted as `/logs` in the agent container, so oracle-aware proof cannot be written there before agent exit. The verifier does not supply oracle facts to the prompt or agent tools. After the unchanged judge finishes, a reviewer interprets the proof against the oracle and records `confirmed|partial|missing|not_checked`; this never changes the benchmark score. The 21 local cases run sequentially under the svelte profile and remain explicitly non-comparable; full-profile comparison runs require a larger host (R1, R11).
+
+### 9. Complete Lite evidence campaign (R12–R15)
+
+First make the pinned chart's object collection explicit: `clusterReceiver.k8sObjects` contains only pod and event watches; disable the chart's separate event receiver, and verify the rendered ConfigMap, exporter, and least-privilege RBAC. Keep this generic provider change in its own commit. An internal collector allowlist informed the choice of objects; its endpoints and credentials are not copied.
+
+Use `cases/splunk-lite/<registered-case-id>/` for small, reviewable case contracts: `prompt.yaml` contains public metadata, one independently observable symptom, and a named prompt profile; `ground_truth.yaml` maps oracle facts to executable source and Splunk checks, expected patterns, discriminating rationale, and `essential|full_oracle_only` status. All 21 cases use one shared typed CLI verifier and one schema validator, not 21 copied programs. This is an executable check *for every case* through its manifest. Its first layer checks representative metrics, traces, logs, pod objects, and event objects; its second layer checks causal evidence, because generic presence cannot prove solvability. Live sanitized proof belongs under gitignored attempt artifacts, not the source tree. Capture bounded source Prometheus/Jaeger/container/Kubernetes observations and compare them to same-window Splunk observations **before** the agent starts; report missing-at-source, missing-in-Splunk, query-error, and unverified separately. If source data was not captured, mark source comparison `unverified`, never infer success from a Splunk count. Separately audit collector counters/queues/lag. Unexpected absence of an essential causal observation stops a valid scored attempt; a predeclared inaccessible full-oracle fact can instead produce a clearly labeled `data_limited` run. A manually reviewed evidence map is mandatory before a case is called fully observable.
+
+Establish baseline readiness before opening the incident window; freeze the start near fault injection and the end only after the fault is visible and bounded Splunk ingestion has settled. The next case cannot start until this window is closed and its source/collector state is cleaned up. Render the frozen benchmark-derived diagnosis body with the current inclusive UTC window in trusted `action_instructions`. For the operator pilot, add one reviewed, short user-observable symptom from `prompt.yaml` through a separately versioned symptom profile; do not leak mechanism, fix, oracle, case ID, or opaque run ID. This arm is non-parity, including when run on a full deployment profile. The time-only baseline remains separate. Save prompt/profile/hash automatically, without a per-case manual preview stop. After the unchanged judge grades the exact final answer, produce a separately versioned Splunk-visible assessment using only verified reachable evidence; neither assessment can change the official score. Per-case report rows link to prompt, answer, native/normalized trace, both judges, source/Splunk proof, and access-gap assessment.
+
+The small `splunk-visible-rca-v1` secondary rubric assesses the saved answer against independently verified, Splunk-reachable facts in three areas: component localization, causal mechanism, and scope/impact. The assessment must cite the fact IDs it considered, mark an area `not_assessable` when its necessary facts were not verified, and return `unverified` rather than normalize a score when there is no meaningful causal path. Otherwise it reports a separate 0–100 score plus concise reasons and the raw secondary judge response/model/backend. This is a diagnostic score for the Splunk-only capability envelope, never a replacement for SRE Gym's original D1/D2/D3 judgment.
+
+Execute 21 cases sequentially in registry order using the existing campaign ledger. Before each case, check remaining host memory/disk and Docker health; preserve partial artifacts and stop safely on resource pressure. Reuse completed, valid incident ingestion for repeated Assistant attempts only when the same scoped window and source/Splunk evidence are retained. After each case, show its saved final answer and scores, checkpoint first, then clean up and recheck resources. Svelte local runs and symptom-guided runs remain non-comparable for different reasons; move full-profile time-only comparisons to a larger host if 16 GiB cannot support them. Do not publish score aggregates until case-level evidence, scoring provenance, and comparability checks pass.
+
+### One-case review gate: CronJob sidecar (not yet passed under the new workflow)
+
+Use `cronjob_sidecar_blocks_completion_hotel_reservation` to validate P2/P3 before the other 20 cases. A proposed non-parity symptom is “A scheduled background task in Hotel Reservation is taking unusually long to finish.” It names a visible impact, not the sidecar, CronJob configuration, or fix; the case recipe must cite the pre-diagnosis observation that supports this wording. The actual UTC start/end are filled only after a stable baseline, fault injection, visible Job accumulation, and ingestion settling.
+
+The case manifest's minimum causal checks are: (1) a pod object whose primary `archiver` terminated `Completed` while `fluent-bit-sidecar` remained `Running`, with both listed as regular containers; (2) at least two distinct affected Job owners or an independently queryable active-without-success Job trend, establishing recurrence rather than one transient pod. For each, the shared verifier checks the Kubernetes/source state and the same-window Splunk destination and stores only sanitized facts/counts. Generic metrics, traces, container logs, and pod/event-object presence are checked separately and do **not** substitute for those two causal checks. The exact CronJob `jobTemplate` is a full-oracle confirmation fact currently available via `kubectl get cronjob`, not through the approved pod/event object receiver; a later object-watch addition would need separate authorization.
+
+| Example check | Source and destination proof | Why it matters |
+|---|---|---|
+| Delivery classes | Source traffic/telemetry plus run/window-scoped Splunk metrics, traces, container logs, pod objects, and event objects | Detects broad routing gaps, but does not establish this RCA. |
+| Primary done, sidecar alive (essential) | Same affected pod in Kubernetes and Splunk pod-object JSON: `archiver=terminated/Completed`, `fluent-bit-sidecar=running`, both under regular `spec.containers` | Distinguishes a sidecar-held Job from an archiver still processing or failing. |
+| Repeated unfinished Jobs (essential) | Source Jobs plus at least two distinct Job owners with that pod pattern in Splunk, or a verified active-without-success Job metric trend | Distinguishes recurring scheduler accumulation from a single transient pod. |
+| CronJob template (full-oracle confirmation) | Source `kubectl get cronjob ... -o json`; currently no authorized CronJob object export | Confirms the exact faulty template; note this visibility gap without pretending it reached Splunk. |
+
+The 2026-09-26 svelte pilot proves only the first pod-object pattern and six representative signal classes. Its original 0/100 score, saved answer, and judge remain untouched; the Job trend, fault-centered window, symptom profile, pre-agent causal gate, and secondary Splunk-visible score are not yet verified. The first conforming rerun must produce those artifacts and be recorded as the first case of the 21-case sequence; report its answer and checks, then continue without a manual prompt-approval pause if all gates pass.
 
 ## System Boundaries
 
@@ -102,6 +129,11 @@ clients/assistant_v3/
 
 atif_converter/adapters/assistant_v3.py [traces] Assistant JSONL to ATIF mapping
 docs/assistant-v3-evaluations.md         [docs] Preflight, one case, Lite, resume, spot check
+docs/assistant-v3-lite-evidence-map.md   [docs] Code-derived case evidence and access-gap map
+sregym/results/assistant_v3_campaign.py  [agent/cisco] Durable provenance and dual-score scorecard
+sregym/results/splunk_lite_cases.py      [agent/cisco] Validated public prompt recipes
+sregym/results/splunk_lite_causal.py     [agent/cisco] Bounded source/Splunk causal checks
+sregym/results/splunk_lite_evidence.py   [agent/cisco] Representative delivery and case proof artifacts
 
 tests/observability/test_base.py         [tests]
 tests/observability/test_splunk.py       [tests]
@@ -110,6 +142,12 @@ tests/clients/test_assistant_v3_driver.py [tests]
 tests/clients/test_assistant_v3_prompt.py [tests]
 tests/traces/test_assistant_v3_adapter.py [tests]
 tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE fixtures
+cases/splunk-lite/<registered-case-id>/  [case contracts] 21 prompt/evidence manifests; no copied verifier code
+tests/results/test_splunk_lite_cases.py   [tests] Registry, schema, and hint safety
+tests/results/test_splunk_lite_evidence.py [tests] Source/Splunk causal gate and sanitized proof
+tests/results/test_splunk_lite_causal.py  [tests] Case discriminators and bounded retry
+tests/results/test_assistant_v3_campaign.py [tests] Scorecard integrity and provenance
+tests/test_main_campaign_abort.py         [tests] Pre-agent gate and campaign abort integration
 ```
 
 ### Modified Files
@@ -123,6 +161,9 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 - `sregym/run_artifacts.py` `[runner]` — validated preallocated opaque identity.
 - `sregym/service/container_runner.py` `[runner]` — enforce per-agent Kubernetes/MCP exposure and allowlist only required Assistant variables; continue stripping judge credentials.
 - `atif_converter/adapters/__init__.py`, `atif_converter/converter.py`, `sregym/traces/convert.py` `[traces]` — register Assistant detection/dispatch.
+- `sregym/results/splunk_lite_evidence.py` `[runner/reusable]` — extend the existing six-signal presence checker with one manifest-driven causal source/Splunk gate; no case-specific Python branches.
+- `sregym/results/assistant_v3_campaign.py` `[results]` — link the raw prompt, both judges, causal proof, and access-gap status in the crash-safe scorecard.
+- `clients/assistant_v3/driver.py` and its named prompt assets `[agent/cisco]` — add the separately versioned symptom profile without altering the frozen baseline profile.
 - `pyproject.toml`, `uv.lock` `[tests]` — dev-only coverage tooling and package discovery for the new modules.
 - Existing focused test files may receive regression cases where that is clearer than creating another file; no unrelated production module is in scope.
 - `tests/observer/test_jaeger.py` may be added for the redirect/restart contract; `tests/test_infrastructure_reuse.py` may receive the corresponding Conductor ordering regression.
@@ -133,20 +174,20 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 2. Runner allocates an opaque attempt identity and binds it to artifacts/provider metadata without exposing the problem ID.
 3. Conductor removes leftovers; provider installs/upgrades the pinned collector with a pre-created Secret and the opaque identity.
 4. SRE Gym deploys Prometheus, Jaeger, its OTel collector with optional trace fan-out, the app/workload, baseline, and fault through the unchanged lifecycle; the Splunk gateway federates application-only series from the existing Prometheus service while its chart receivers continue to own Kubernetes metrics.
-5. Provider polls each required Splunk signal. Failure records an infrastructure-invalid artifact set and skips agent launch.
-6. Assistant driver calls `/get_app`, renders and records the frozen prompt, then opens one fresh explicit-model SSE session on the existing surface.
-7. Driver persists redacted ordered events. A single valid terminal diagnosis is posted once to `/submit`; SRE Gym's existing judge evaluates it unchanged.
-8. Provider performs the closing signal check, records collector counter deltas, waits boundedly for queue drain, and writes the delivery report. Existing cleanup then runs without retrying the agent.
-9. Artifact publication canonicalizes the opaque ID. A failed delivery audit preserves Assistant/judge evidence but excludes the attempt from diagnosis-rate aggregation.
-10. ATIF conversion and deterministic metrics run atomically; SQLite ingestion and current result browsing continue unchanged.
-11. The runner checkpoints campaign progress and scorecard, then performs and records the post-grade golden-telemetry audit before advancing to the next case.
+5. After baseline readiness, record the fault-centered start, inject the fault, observe its visible symptom, wait for bounded indexing, and freeze a non-overlapping end. Provider polls required Splunk signals.
+6. The shared case verifier executes representative and case-causal source/Splunk checks within the frozen window. It stores sanitized harness-only proof. An unexpected missing essential signal prevents a valid scored launch; an explicitly mapped inaccessible fact marks the attempt `data_limited`.
+7. Assistant driver calls `/get_app`, renders and records the chosen frozen-body prompt with window and, for the separately labeled exploratory arm, one reviewed symptom; it opens one fresh explicit-model SSE session on the existing surface.
+8. Driver persists redacted ordered events. A single valid terminal diagnosis is posted once to `/submit`; SRE Gym's existing judge evaluates it unchanged.
+9. Provider performs the closing signal check, records collector counter deltas, waits boundedly for queue drain, and writes the delivery report. A separate Splunk-visible judge considers only reviewed, verified available evidence and never changes the benchmark result.
+10. Artifact publication canonicalizes the opaque ID. Failed delivery preserves Assistant/judge evidence but excludes the attempt from valid diagnosis-rate aggregation. ATIF conversion and deterministic metrics run atomically.
+11. The runner checkpoints the linked scorecard, reports that case's final answer and both score statuses, then cleans up and checks resources before advancing. A post-grade reviewer may add oracle interpretation without editing the original score.
 
 ## Test and Requirement Traceability
 
 | Requirement | Automated evidence |
 |---|---|
 | R1 | All registered Lite cases use one driver; diagnosis-only lifecycle/submission regression; disabled provider snapshot |
-| R2 | Reference hash, exact-once substitution, preserved-order diff, rendering, oracle/hint rejection tests |
+| R2 | Reference hash, exact-once substitution, preserved-order diff, baseline rendering and hint rejection; separate versioned symptom-profile safety/provenance tests |
 | R3 | Null provider regression; four-signal readiness; opaque identity; Secret/command redaction; TLS, collector-counter, and queue-drain tests |
 | R4 | Request-shape, fresh-session, explicit model/reasoning, no-surface, no-kubeconfig, one-submit tests |
 | R5 | SSE fixtures, partial artifact tests, ATIF schema/order/subagent/error tests, idempotent byte comparison |
@@ -154,8 +195,9 @@ tests/fixtures/assistant_v3/             [tests] Secret-free success/failure SSE
 | R7 | 429/5xx exhaustion, 400/401/403 fail-fast, mid-stream disconnect/no retry, cleanup/resume tests |
 | R8 | CLI command tests and a scripted artifact spot-check using success plus invalid fixtures |
 | R9 | 100% new-module branch coverage, 100% changed-line report, production-change-to-test review table |
+| R11–R15 | Fail-first case-manifest/schema tests; shared verifier source/Splunk query and missing/error tests; frozen-window non-overlap and symptom-profile tests; oracle isolation; scorecard provenance/rebuild and dual-grade separation tests; one live case reviewed before suite execution |
 
-Live acceptance starts with `edge_request_filter_cpu_saturation` and `readiness_probe_misconfiguration_social_network`, then expands to the Lite suite. The svelte profile is smoke-only and must persist `comparable: false`; the normal profile persists `comparable: true`.
+Live acceptance for the new workflow starts with one reviewed CronJob case, then expands only after its scripted evidence gate and prompt/scorecard provenance are checked together. The svelte deployment profile is resource-reduced, and the symptom-guided prompt profile is non-parity; both distinctions must persist independently. A normal deployment profile alone does not make a symptom-guided run leaderboard-comparable.
 
 ## Constraints & Boundaries
 

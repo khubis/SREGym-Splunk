@@ -759,7 +759,10 @@ def test_non_serializable_metadata_is_rejected_before_writing(tmp_path: Path) ->
     assert list(tmp_path.iterdir()) == []
 
 
-def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_submission(tmp_path: Path) -> None:
+@pytest.mark.parametrize("symptom", [None, "Checkout requests are failing."])
+def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_submission(
+    tmp_path: Path, symptom: str | None,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -810,13 +813,14 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
             attempt=1,
             artifacts_root=tmp_path,
             benchmark_profile="full",
-            comparable=True,
+            comparable=symptom is None,
             judge_model="fixed-judge",
             judge_backend="api",
             observability_provider="splunk",
             readiness_report=readiness(),
             attempt_started_at=STARTED_AT,
             telemetry_window_ended_at=WINDOW_ENDED_AT,
+            symptom=symptom,
         ),
         conductor=conductor,
         assistant=assistant,
@@ -838,6 +842,8 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert "otel-demo" not in session_request["action_instructions"]
     assert "2026-09-23T12:00:00Z" in session_request["action_instructions"]
     assert "2026-09-23T12:05:00Z" in session_request["action_instructions"]
+    if symptom is not None:
+        assert session_request["action_instructions"].endswith("Observed symptom: " + symptom)
     assert RUN_ID not in session_request["prompt"]
     assert "surface" not in session_request
     assert "oracle" not in session_request["prompt"]
@@ -849,6 +855,8 @@ def test_driver_uses_public_app_metadata_one_fresh_session_and_one_diagnosis_sub
     assert json.loads((tmp_path / "assistant_v3" / "terminal.json").read_text())["submission_count"] == 1
     persisted_request = json.loads((tmp_path / "assistant_v3" / "request.json").read_text())
     assert persisted_request["action_instructions"] == session_request["action_instructions"]
+    if symptom is not None:
+        assert persisted_request["action_profile_id"] == "sregym-symptom-window-v1"
     assert persisted_request["prompt"] == session_request["prompt"]
 
 
@@ -915,6 +923,52 @@ def test_driver_rejects_an_explicit_out_of_window_query_before_submission(tmp_pa
     assert failure["included_in_diagnosis_pass_rate"] is False
 
 
+def test_noncomparable_guided_run_submits_final_answer_and_records_scope_warning(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"stage": "diagnosis"})
+        if request.url.path == "/get_app":
+            return httpx.Response(200, json={
+                "app_name": "Hotel Reservation", "namespace": "hotel-reservation",
+                "namespaces": ["hotel-reservation"], "descriptions": "A service application.",
+            })
+        if request.url.path == "/v2/assistant/sessions":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
+                b'event: tool.use\ndata: {"id":"call-1","input":{"end_time":"2026-09-23T12:06:00Z"}}\n\n'
+                b'event: message.complete\ndata: {"final_text":"Recommendation failed during the incident."}\n\n'
+            ))
+        if request.url.path == "/submit":
+            return httpx.Response(200, json={"status": "200", "stage": "diagnosis", "message": "accepted"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    assistant = AssistantV3Client(
+        AssistantV3Config("https://assistant", "assistant-secret", "sf-secret", "gpt-5.6-luna", "medium"),
+        http_client=httpx.Client(transport=transport), retry_policy=RetryPolicy(max_attempts=1),
+        clock=iter((0.0, 0.01, 0.02)).__next__,
+    )
+    result = execute_assistant_attempt(
+        DriverRunConfig(
+            run_id=RUN_ID, attempt=1, artifacts_root=tmp_path, benchmark_profile="svelte",
+            comparable=False, judge_model="fixed-judge", judge_backend="api",
+            observability_provider="splunk", readiness_report=readiness(),
+            attempt_started_at=STARTED_AT, telemetry_window_ended_at=WINDOW_ENDED_AT,
+            symptom="Recommendation requests are timing out.",
+        ),
+        conductor=ConductorClient("http://conductor", http_client=httpx.Client(transport=transport)),
+        assistant=assistant, clock=iter((100.0, 100.2)).__next__,
+    )
+    assert result.classification == "completed"
+    assert [request.url.path for request in requests].count("/submit") == 1
+    assert json.loads(requests[-1].content)["solution"] == "Recommendation failed during the incident."
+    metadata = json.loads((tmp_path / "run_metadata.json").read_text())
+    assert metadata["telemetry_scope_warning"] == "Assistant tool trace queried telemetry after the provided time window"
+    assert metadata["included_in_diagnosis_pass_rate"] is True
+
+
 def test_scope_validator_rejects_explicit_pre_attempt_windows_and_allows_current_scope() -> None:
     current = event(
         1,
@@ -978,6 +1032,7 @@ def test_action_window_preserves_subsecond_precision_used_by_scope_validator() -
     assert "2026-09-23T12:00:00.291000Z" in instructions
     assert "2026-09-23T12:05:00.088000Z" in instructions
 
+
     bounded_query = event(
         1,
         1.0,
@@ -994,6 +1049,15 @@ def test_action_window_preserves_subsecond_precision_used_by_scope_validator() -
         window_started_at=precise_start,
         window_ended_at=precise_end,
     ) is None
+
+
+def test_symptom_guided_instructions_only_append_the_reviewed_symptom() -> None:
+    baseline = driver_module._build_action_instructions(STARTED_AT, WINDOW_ENDED_AT)
+    symptom = "A scheduled background task in Hotel Reservation is taking unusually long to finish."
+    guided = driver_module._build_action_instructions(
+        STARTED_AT, WINDOW_ENDED_AT, symptom=symptom,
+    )
+    assert guided == baseline + "\nObserved symptom: " + symptom
 
 
 def test_driver_preserves_invalid_stream_and_never_submits_it(tmp_path: Path) -> None:

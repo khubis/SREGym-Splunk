@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: namespace_memory_limit
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/namespace_memory_limit.py
+candidate_evidence:
+  - fact: "Search replacement pods are rejected with must specify memory while older pods can remain running"
+    signal: events
+    query_focus: "search FailedCreate/admission event with must specify memory"
+  - fact: "ResourceQuota memory-limit-quota requires memory declarations the workload lacks"
+    signal: other_kubernetes_api
+    query_focus: "ResourceQuota memory-limit-quota spec and search Deployment template resources"

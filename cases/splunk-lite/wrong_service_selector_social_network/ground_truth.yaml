@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: wrong_service_selector_social_network
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/wrong_service_selector.py
+candidate_evidence:
+  - fact: "user-service traffic fails while intended backing pods remain healthy"
+    signal: traces
+    query_focus: "user-service caller failures and dependency"
+  - fact: "user-service Service selector adds an incorrect label and yields zero or insufficient endpoints"
+    signal: other_kubernetes_api
+    query_focus: "user-service Service spec.selector and EndpointSlices"

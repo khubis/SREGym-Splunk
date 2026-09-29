@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: admission_webhook_outage_hotel_reservation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/admission_webhook_outage.py
+candidate_evidence:
+  - fact: "Recommendation ReplicaSet cannot recreate pods because webhook admission calls fail"
+    signal: events
+    query_focus: "recommendation FailedCreate event with failed calling webhook"
+  - fact: "A namespace-scoped ValidatingWebhookConfiguration with failurePolicy Fail points to nonexistent backend Service"
+    signal: other_kubernetes_api
+    query_focus: "ValidatingWebhookConfiguration namespaceSelector/clientConfig.service and absent backend Service"

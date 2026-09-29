@@ -40,7 +40,7 @@ NAMESPACE = "sregym-observability"
 SECRET_NAME = "sregym-splunk-otel-credentials"
 _HELM_TIMEOUT = "5m"
 _SIGNALFLOW_RESOLUTION_MS = 60_000
-_SIGNALFLOW_INGESTION_LAG = timedelta(minutes=2)
+SIGNALFLOW_INGESTION_LAG = timedelta(minutes=2)
 _COLLECTOR_WORKLOADS = (
     f"deployment/{RELEASE_NAME}",
     f"deployment/{RELEASE_NAME}-k8s-cluster-receiver",
@@ -68,7 +68,7 @@ class ReliabilityPolicy:
     """Bounded polling controls shared by readiness and delivery assurance."""
 
     readiness_timeout_seconds: float = 360.0
-    drain_timeout_seconds: float = 60.0
+    drain_timeout_seconds: float = 180.0
     request_timeout_seconds: float = 10.0
     max_attempts: int = 40
     initial_backoff_seconds: float = 1.0
@@ -136,6 +136,10 @@ class SplunkQueryBackend(Protocol):
         timeout_seconds: float,
     ) -> CollectorSnapshot: ...
 
+    def collector_queue_minimum(
+        self, context: AttemptContext, since: datetime, checked_at: datetime, timeout_seconds: float
+    ) -> dict[SignalName, int | None]: ...
+
     def close(self) -> None: ...
 
 
@@ -188,7 +192,7 @@ class SplunkHttpBackend:
         self._app_base = f"https://app.{configuration.realm}.signalfx.com"
         self._stream_base = f"https://stream.{configuration.realm}.signalfx.com"
         self._trace_jobs: dict[str, str] = {}
-        self._log_jobs: dict[tuple[str, SignalName], str] = {}
+        self._log_jobs: dict[tuple[str, str], str] = {}
 
     def resolve_logs_connection(self, timeout_seconds: float, requested_connection_id: str | None = None) -> str:
         payload = self._graphql(
@@ -264,6 +268,48 @@ class SplunkHttpBackend:
             return len(examples)
         return self._query_logs(signal, context, scope, connection_id, checked_at, timeout_seconds)
 
+    def query_application_metric_values(
+        self,
+        metric_names: tuple[str, ...],
+        context: AttemptContext,
+        scope: ApplicationScope,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> dict[str, float]:
+        """Read a bounded set of named application metrics for a single attempt.
+
+        The values are the latest historical samples, not counter deltas. The
+        verifier may establish presence/backlog, but must not infer a retry
+        amplification rate from cumulative totals.
+        """
+        if (
+            not 1 <= len(metric_names) <= 8
+            or len(set(metric_names)) != len(metric_names)
+            or any(re.fullmatch(r"[A-Za-z_:][A-Za-z0-9_:]*", name) is None for name in metric_names)
+        ):
+            raise ValueError("invalid application metric names")
+        namespaces = " or ".join(f"filter('namespace', '{namespace}')" for namespace in scope.namespaces)
+        scope_filter = (
+            f"filter('sregym.run.id', '{context.run_id}') and "
+            "filter('sregym.metric.source', 'sregym_prometheus_application') and "
+            f"({namespaces})"
+        )
+        program = "\n".join(
+            f"data('{name}', filter={scope_filter}, rollup='latest').max().publish(label='metric_{index}')"
+            for index, name in enumerate(metric_names)
+        )
+        # Keep _signalflow's ingestion guard: a completed historical window
+        # returns promptly, while the live tail may remain open long enough to
+        # turn present application metrics into repeated query timeouts.
+        values = self._signalflow(
+            program, context.attempt_started_at, checked_at, timeout_seconds,
+        )
+        return {
+            name: values[f"metric_{index}"]
+            for index, name in enumerate(metric_names)
+            if f"metric_{index}" in values
+        }
+
     def collector_snapshot(
         self,
         context: AttemptContext,
@@ -323,6 +369,29 @@ class SplunkHttpBackend:
             queue_size=queue_size,
         )
 
+    def collector_queue_minimum(
+        self, context: AttemptContext, since: datetime, checked_at: datetime, timeout_seconds: float
+    ) -> dict[SignalName, int | None]:
+        """Observe an empty exporter queue after workload stop, between live scrapes.
+
+        The collector continues exporting its own metrics, so a single latest
+        queue sample can catch an in-flight point even after earlier batches
+        drained. Only the post-stop, ingestion-complete interval is eligible.
+        """
+        statements = [
+            "data('otelcol_exporter_queue_size', filter=filter('sregym.run.id', "
+            f"'{context.run_id}') and filter('data_type', '{data_type}'), rollup='min')"
+            f".max().publish(label='queue_min_{data_type}')"
+            for data_type in ("metrics", "traces", "logs")
+        ]
+        values = self._signalflow("\n".join(statements), since, checked_at, timeout_seconds)
+        return {
+            "metrics": _optional_int(values.get("queue_min_metrics")),
+            "traces": _optional_int(values.get("queue_min_traces")),
+            "logs": _optional_int(values.get("queue_min_logs")),
+            "kubernetes_events": _optional_int(values.get("queue_min_logs")),
+        }
+
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
@@ -337,13 +406,113 @@ class SplunkHttpBackend:
         timeout_seconds: float,
     ) -> int:
         namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
-        kind = "k8s.container.name=*" if signal == "logs" else "k8s.event.reason=*"
+        kind = (
+            "k8s.container.name=*"
+            if signal == "logs"
+            else 'sourcetype="kube:object:events"'
+        )
         search_index = self.configuration.hec_index or "*"
         query = (
             f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
             f"({namespaces}) {kind} | head 1"
         )
-        job_key = (context.run_id, signal)
+        return self._search_log_rows(
+            query, (context.run_id, signal), context, connection_id, checked_at, timeout_seconds
+        )
+
+    def query_object(
+        self,
+        kind: str,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int:
+        """Count a bounded pod/event object example in the selected Logs connection."""
+        if kind not in {"pods", "events"}:
+            raise ValueError("only approved pod and event objects may be queried")
+        namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
+        search_index = self.configuration.hec_index or "*"
+        query = (
+            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
+            f'({namespaces}) sourcetype="kube:object:{kind}" | head 1'
+        )
+        return self._search_log_rows(
+            query, (context.run_id, f"object:{kind}"), context, connection_id, checked_at, timeout_seconds
+        )
+
+    def query_scoped_examples(
+        self,
+        kind: str,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+        *,
+        limit: int = 50,
+        terms: tuple[str, ...] = (),
+        container_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch bounded in-window rows for an in-memory causal check.
+
+        Callers must never save unredacted rows: pod specifications and logs can
+        contain user data. Only sanitized match results belong in run artifacts.
+        """
+        if kind not in {"logs", "pods", "events"}:
+            raise ValueError("only approved log, pod, and event examples may be queried")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("example limit must be between 1 and 100")
+        if len(terms) > 4 or any(
+            not isinstance(term, str) or re.fullmatch(r"[A-Za-z0-9_.:/=-]{1,80}", term) is None
+            for term in terms
+        ):
+            raise ValueError("invalid scoped search term")
+        if container_name is not None and (
+            kind != "logs" or re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", container_name) is None
+        ):
+            raise ValueError("invalid scoped container name")
+        namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
+        selector = (
+            f'k8s.container.name="{container_name}"' if container_name is not None else
+            "k8s.container.name=*" if kind == "logs" else f'sourcetype="kube:object:{kind}"'
+        )
+        search_index = self.configuration.hec_index or "*"
+        term_filter = " ".join(f'"{term}"' for term in terms)
+        query = (
+            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
+            f"({namespaces}) {selector} {term_filter} | head {limit}"
+        )
+        return self._search_log_examples(
+            query, (context.run_id, f"examples:{kind}:{container_name}:{limit}:{':'.join(terms)}"), context,
+            connection_id, checked_at, timeout_seconds, limit=limit,
+        )
+
+    def _search_log_rows(
+        self,
+        query: str,
+        job_key: tuple[str, str],
+        context: AttemptContext,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+    ) -> int:
+        return len(self._search_log_examples(
+            query, job_key, context, connection_id, checked_at, timeout_seconds, limit=1,
+        ))
+
+    def _search_log_examples(
+        self,
+        query: str,
+        job_key: tuple[str, str],
+        context: AttemptContext,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
         job_id = self._log_jobs.get(job_key)
         if job_id is None:
             created = self._graphql(
@@ -371,7 +540,7 @@ class SplunkHttpBackend:
             f"{self._app_base}/v2/logs/graphql",
             "searchJobResultsWithoutFieldsSummary",
             _LOG_JOB_RESULTS,
-            {"id": job_id, "count": 1, "offset": 0},
+            {"id": job_id, "count": limit, "offset": 0},
             timeout_seconds,
         )
         job = result.get("data", {}).get("searchJob", {})
@@ -381,9 +550,26 @@ class SplunkHttpBackend:
             rows = []
         if not isinstance(rows, list):
             raise SplunkBackendError(status_code=500, transient=True)
+        raw_fields = result_set.get("fields", []) if isinstance(result_set, dict) else []
+        fields = [str(item.get("name")) for item in raw_fields if isinstance(item, dict) and item.get("name")]
+        normalized: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            if isinstance(row, dict):
+                normalized.append({str(key): value for key, value in row.items()})
+            elif isinstance(row, list):
+                if row and all(isinstance(item, dict) for item in row):
+                    normalized.append({
+                        str(item.get("field") or item.get("name") or item.get("key")): item.get("value")
+                        for item in row
+                    })
+                else:
+                    normalized.append({fields[index] if index < len(fields) else f"field_{index}": value
+                                       for index, value in enumerate(row)})
+            else:
+                normalized.append({fields[0] if fields else "_raw": row})
         if str(job.get("status", "")).strip().lower() in _COMPLETE_JOB_STATUSES:
             self._log_jobs.pop(job_key, None)
-        return len(rows)
+        return normalized
 
     def _query_traces(
         self,
@@ -477,7 +663,7 @@ class SplunkHttpBackend:
         # SignalFlow keeps a bounded historical job open while its automatic
         # ingest-delay window can still change the requested tail. Query a
         # conservative completed window so HTTP timeouts remain meaningful.
-        safe_stop = stop - _SIGNALFLOW_INGESTION_LAG
+        safe_stop = stop - SIGNALFLOW_INGESTION_LAG
         if safe_stop <= start:
             return {}
         response = self._request(
@@ -879,14 +1065,33 @@ class SplunkObservabilityProvider:
         if state.delivery is not None:
             return state.delivery
 
+        drain_since = self._now()
         connection_id = self._connection_id or self._resolve_connection()
         closing, _ = self._poll_readiness(context, scope, connection_id, strict=False)
         closing_snapshot = self._snapshot_with_retry(context, strict=False)
         self._update_high_water(state.queue_high_water, closing_snapshot.queue_size)
         final_snapshot = closing_snapshot
         drained = self._queues_drained(final_snapshot.queue_size)
+        drain_minimum: dict[SignalName, int | None] | None = None
         drain_started = self._monotonic()
         for attempt in range(self._policy.max_attempts):
+            if not drained:
+                try:
+                    minimum = self._query_backend().collector_queue_minimum(
+                        context, drain_since, self._now(), self._policy.request_timeout_seconds
+                    )
+                except SplunkBackendError as error:
+                    if not error.transient:
+                        break
+                else:
+                    if any(value is not None for value in minimum.values()):
+                        drain_minimum = minimum
+                    if self._queues_drained(minimum):
+                        # Sample failures after the observed drain, not just
+                        # before it; keep the terminal counters fail-closed.
+                        final_snapshot = self._snapshot_with_retry(context, strict=False, attempts=1)
+                        self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
+                        drained = True
             elapsed = self._monotonic() - drain_started
             if drained or elapsed >= self._policy.drain_timeout_seconds:
                 break
@@ -896,11 +1101,47 @@ class SplunkObservabilityProvider:
                 break
             final_snapshot = self._snapshot_with_retry(context, strict=False, attempts=1)
             self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
-            drained = self._queues_drained(final_snapshot.queue_size)
+            drained = drained or self._queues_drained(final_snapshot.queue_size)
 
-        sent_delta = self._deltas(state.opening_snapshot.sent, closing_snapshot.sent)
-        failed_delta = self._deltas(state.opening_snapshot.send_failed, closing_snapshot.send_failed)
-        enqueue_delta = self._deltas(state.opening_snapshot.enqueue_failed, closing_snapshot.enqueue_failed)
+        opening_snapshot = state.opening_snapshot
+        if any(
+            value is None
+            for counters in (opening_snapshot.sent, opening_snapshot.send_failed, opening_snapshot.enqueue_failed)
+            for value in counters.values()
+        ):
+            # Asynchronous metric indexing can leave an opening counter absent
+            # even though its point becomes searchable later. Re-query only the
+            # original opening interval; _signalflow subtracts the ingestion
+            # guard, so offset this *historical* stop to reach opening_at.
+            # Never infer zero from missing data.
+            opening_at = max(signal.checked_at for signal in state.opening.signals)
+            historical = self._snapshot_with_retry(
+                context, strict=False, attempts=1,
+                checked_at=opening_at + SIGNALFLOW_INGESTION_LAG,
+            )
+
+            def fill_missing(original: dict[SignalName, int | None], late: dict[SignalName, int | None]) -> dict[SignalName, int | None]:
+                return {signal: original[signal] if original[signal] is not None else late[signal] for signal in SIGNAL_NAMES}
+
+            opening_snapshot = CollectorSnapshot(
+                sent=fill_missing(opening_snapshot.sent, historical.sent),
+                send_failed=fill_missing(opening_snapshot.send_failed, historical.send_failed),
+                enqueue_failed=fill_missing(opening_snapshot.enqueue_failed, historical.enqueue_failed),
+                queue_size=opening_snapshot.queue_size,
+            )
+
+        # Count exports and failures through the terminal drain sample. If the
+        # initial closing sample was unavailable, retain the unknown counters:
+        # a later healthy sample cannot prove what happened across that gap.
+        closing_available = all(
+            value is not None
+            for counters in (closing_snapshot.sent, closing_snapshot.send_failed, closing_snapshot.enqueue_failed)
+            for value in counters.values()
+        )
+        terminal_counters = final_snapshot if closing_available else closing_snapshot
+        sent_delta = self._deltas(opening_snapshot.sent, terminal_counters.sent)
+        failed_delta = self._deltas(opening_snapshot.send_failed, terminal_counters.send_failed)
+        enqueue_delta = self._deltas(opening_snapshot.enqueue_failed, terminal_counters.enqueue_failed)
         all_counters = (*sent_delta.values(), *failed_delta.values(), *enqueue_delta.values())
         queues_available = all(value is not None for value in state.queue_high_water.values()) and all(
             value is not None for value in final_snapshot.queue_size.values()
@@ -926,6 +1167,7 @@ class SplunkObservabilityProvider:
             queue_final_size=final_snapshot.queue_size,
             drained=drained,
             valid=valid,
+            queue_drain_minimum=drain_minimum,
         )
         return state.delivery
 
@@ -1122,13 +1364,14 @@ class SplunkObservabilityProvider:
         *,
         strict: bool,
         attempts: int | None = None,
+        checked_at: datetime | None = None,
     ) -> CollectorSnapshot:
         limit = attempts or self._policy.max_attempts
         started = self._monotonic()
         for attempt in range(limit):
             try:
                 return self._query_backend().collector_snapshot(
-                    context, self._now(), self._policy.request_timeout_seconds
+                    context, checked_at or self._now(), self._policy.request_timeout_seconds
                 )
             except SplunkBackendError as error:
                 if not error.transient:

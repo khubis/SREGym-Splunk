@@ -8,7 +8,8 @@ def get_llm_backend(
     api_base: str | None = None,
     api_key: str | None = None,
     provider: str | None = None,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
+    top_p: float | None = 0.95,
     max_tokens: int | None = None,
     usage_available: bool = True,
     retry: bool = True,
@@ -22,6 +23,7 @@ def get_llm_backend(
         api_key=api_key,
         provider=provider,
         temperature=temperature,
+        top_p=top_p,
         max_tokens=max_tokens,
         usage_available=usage_available,
         retry=retry,
@@ -57,12 +59,16 @@ def get_llm_backend_for_judge(
         # The selected CLI owns inference, even for Claude/native model names or
         # explicit oracle provider settings. Never fall through to API billing.
         provider, api_base, api_key = "openai", bridge_url, "dummy"
+    # GPT-5 deployments reject non-default temperature/top_p; omit both rather
+    # than sending the older judge defaults (0.0 and 0.95).
+    default_sampling_only = model_id.rsplit("/", 1)[-1].startswith("gpt-5.")
     return get_llm_backend(
         model_id,
         api_base=api_base if api_base is not None else os.environ.get("JUDGE_API_BASE"),
         api_key=api_key if api_key is not None else os.environ.get("JUDGE_API_KEY"),
         provider=provider,
-        temperature=temperature,
+        temperature=None if default_sampling_only else temperature,
+        top_p=None if default_sampling_only else 0.95,
         max_tokens=max_tokens,
         usage_available=not bool(bridge_url),
         retry=not bool(bridge_url),

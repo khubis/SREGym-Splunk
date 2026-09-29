@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -75,8 +76,11 @@ class FakeBackend:
         self.connection_outcomes: list[str | Exception] = []
         self.query_outcomes: dict[str, list[int | Exception]] = {signal: [] for signal in SIGNALS}
         self.snapshot_outcomes: list[CollectorSnapshot | Exception] = []
+        self.drain_outcomes: list[dict[str, int | None] | Exception] = []
+        self.drain_calls: list[str] = []
         self.query_calls: list[tuple[str, str, tuple[str, ...], str]] = []
         self.snapshot_calls: list[str] = []
+        self.snapshot_times: list[datetime] = []
         self.connection_calls = 0
         self.requested_connection_ids: list[str | None] = []
         self.closed = False
@@ -112,7 +116,17 @@ class FakeBackend:
         timeout_seconds: float,
     ) -> CollectorSnapshot:
         self.snapshot_calls.append(context.run_id)
+        self.snapshot_times.append(checked_at)
         outcome = self.snapshot_outcomes.pop(0) if self.snapshot_outcomes else snapshot()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def collector_queue_minimum(
+        self, context: AttemptContext, since: datetime, checked_at: datetime, timeout_seconds: float
+    ) -> dict[str, int | None]:
+        self.drain_calls.append(context.run_id)
+        outcome = self.drain_outcomes.pop(0) if self.drain_outcomes else dict.fromkeys(SIGNALS, None)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -246,7 +260,7 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
     assert values["gateway"]["tokenPassthrough"] is False
     assert values["gateway"]["replicaCount"] == 1
     assert values["agent"]["enabled"] is True
-    assert values["clusterReceiver"]["eventsEnabled"] is True
+    assert values["clusterReceiver"]["eventsEnabled"] is False
     assert values["agent"]["ports"] == {
         "otlp": None,
         "otlp-http": None,
@@ -267,6 +281,67 @@ def test_values_pin_secure_bounded_single_gateway_configuration():
         assert set(resources) == {"requests", "limits"}
         assert set(resources["requests"]) == {"cpu", "memory"}
         assert set(resources["limits"]) == {"cpu", "memory"}
+
+
+def test_values_watch_only_approved_kubernetes_objects_once():
+    values = yaml.safe_load(Path("sregym/observer/splunk/values.yaml").read_text())
+    receiver = values["clusterReceiver"]
+    assert receiver["k8sObjects"] == [
+        {"name": "pods", "mode": "watch"},
+        {"name": "events", "mode": "watch"},
+    ]
+    assert receiver["eventsEnabled"] is False
+    assert values["rbac"]["customRules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["pods", "events"],
+            "verbs": ["get", "list", "watch"],
+        }
+    ]
+
+
+def test_pinned_chart_renders_one_approved_object_pipeline():
+    if shutil.which("helm") is None:
+        pytest.skip("Helm is not installed")
+    command = [
+        "helm", "template", "test", "splunk-otel-collector-chart/splunk-otel-collector",
+        "--version", CHART_VERSION, "--namespace", NAMESPACE,
+        "-f", "sregym/observer/splunk/values.yaml",
+        "--set", "splunkObservability.realm=rc0",
+        "--set", "splunkPlatform.endpoint=https://example.invalid:8088/services/collector",
+        "--set", "clusterName=test",
+        "--set", "splunkPlatform.index=main",
+    ]
+    rendered = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    if rendered.returncode != 0 and "repo splunk-otel-collector-chart not found" in rendered.stderr:
+        pytest.skip("Pinned Splunk chart repository is not configured")
+    assert rendered.returncode == 0, rendered.stderr
+    documents = [item for item in yaml.safe_load_all(rendered.stdout) if isinstance(item, dict)]
+    configmap = next(
+        item for item in documents
+        if item.get("kind") == "ConfigMap"
+        and item.get("metadata", {}).get("name") == f"{RELEASE_NAME}-otel-k8s-cluster-receiver"
+    )
+    config = yaml.safe_load(configmap["data"]["relay"])
+    assert config["receivers"]["k8s_objects"]["objects"] == [
+        {"name": "pods", "mode": "watch"}, {"name": "events", "mode": "watch"}
+    ]
+    assert "k8s_events" not in config["receivers"]
+    object_pipeline = config["service"]["pipelines"]["logs/objects"]
+    assert object_pipeline["receivers"] == ["k8s_objects"]
+    assert object_pipeline["exporters"] == ["splunk_hec/platform_logs"]
+    assert "metrics" in config["service"]["pipelines"]
+    assert not any(
+        "k8s_events" in pipeline["receivers"]
+        for pipeline in config["service"]["pipelines"].values()
+    )
+    role = next(item for item in documents if item.get("kind") == "ClusterRole")
+    assert any(
+        rule.get("apiGroups") == [""]
+        and rule.get("resources") == ["pods", "events"]
+        and rule.get("verbs") == ["get", "list", "watch"]
+        for rule in role["rules"]
+    )
 
 
 def test_values_federate_the_existing_application_catalog_without_kubernetes_duplicates():
@@ -1060,7 +1135,7 @@ def test_http_backend_queries_all_four_signals_with_exported_run_scope():
     assert all('index="*"' in query for query in log_queries)
     assert all(f'k8s.cluster.name="{RUN_ID}"' in query and "social-network" in query for query in log_queries)
     assert "k8s.container.name=*" in log_queries[0]
-    assert "k8s.event.reason=*" in log_queries[1]
+    assert 'sourcetype="kube:object:events"' in log_queries[1]
     assert all(payload["variables"]["queryType"] == "SPL1" for payload in log_payloads)
     assert all(payload["variables"]["connectionID"] == "connection-default" for payload in log_payloads)
     assert all(payload["variables"]["queryParameters"]["timezone"] == "UTC" for payload in log_payloads)
@@ -1301,6 +1376,94 @@ def test_finish_attempt_reports_counter_deltas_high_water_and_queue_drain():
     assert provider.finish_attempt(attempt_context(), scope) is delivery
 
 
+def test_finish_attempt_counts_exports_and_failures_during_queue_drain():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [
+        snapshot(sent=10, queue=2),
+        snapshot(sent=15, queue=1),
+        snapshot(sent=20, failed=1, queue=0),
+    ]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 10)
+    assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, 1)
+    assert delivery.drained is True
+    assert delivery.valid is False
+
+
+def test_finish_attempt_accepts_post_stop_zero_between_continuous_metric_scrapes():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(sent=10), snapshot(sent=20, queue=1)]
+    backend.snapshot_outcomes.extend(snapshot(sent=30, queue=1) for _ in range(40))
+    backend.drain_outcomes = [dict.fromkeys(SIGNALS, 0)]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=2))
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is True
+    assert delivery.drained is True
+    assert delivery.queue_final_size["metrics"] == 1
+    assert delivery.queue_drain_minimum == dict.fromkeys(SIGNALS, 0)
+    assert backend.drain_calls == [RUN_ID]
+
+
+def test_finish_attempt_rejects_stuck_queue_with_no_post_stop_zero():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(sent=10), snapshot(sent=20, queue=1)]
+    backend.snapshot_outcomes.extend(snapshot(sent=30, queue=1) for _ in range(40))
+    backend.drain_outcomes = [dict.fromkeys(SIGNALS, 1)]
+    provider = prepared_provider(backend, policy=reliability_policy(max_attempts=2))
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is False
+    assert delivery.drained is False
+    assert delivery.queue_drain_minimum == dict.fromkeys(SIGNALS, 1)
+
+
+def test_finish_attempt_checks_failure_counters_after_post_stop_drain():
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [snapshot(sent=10), snapshot(sent=20, queue=1), snapshot(sent=30, failed=1, queue=1)]
+    backend.drain_outcomes = [dict.fromkeys(SIGNALS, 0)]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.drained is True
+    assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, 1)
+    assert delivery.valid is False
+
+
+def test_finish_attempt_requeries_late_indexed_opening_counters_at_original_time():
+    backend = FakeBackend()
+    opening = snapshot(sent=10, queue=1)
+    opening.sent["traces"] = None
+    opening.send_failed["traces"] = None
+    opening.enqueue_failed["traces"] = None
+    backend.snapshot_outcomes = [opening, snapshot(sent=15, queue=0), snapshot(sent=10, queue=1)]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is True
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 5)
+    assert backend.snapshot_times[-1] == max(
+        signal.checked_at for signal in provider._reliability[RUN_ID].opening.signals
+    ) + splunk_module.SIGNALFLOW_INGESTION_LAG
+
+
 @pytest.mark.parametrize("invalid_case", ("missing_counter", "send_failure", "enqueue_failure", "undrained"))
 def test_finish_attempt_invalidates_missing_failures_and_undrained_queues(invalid_case):
     backend = FakeBackend()
@@ -1397,6 +1560,7 @@ def test_default_reliability_policy_covers_observed_apm_visibility_lag():
     policy = ReliabilityPolicy()
 
     assert policy.readiness_timeout_seconds >= 300.0
+    assert policy.drain_timeout_seconds >= 180.0
     assert policy.max_attempts >= 36
 
 
@@ -1447,6 +1611,29 @@ def test_http_backend_reads_collector_counters_and_normalizes_sparse_zero_failur
         "kubernetes_events": 0,
     }
     assert result.queue_size == {"metrics": 2, "traces": 1, "logs": 0, "kubernetes_events": 0}
+
+
+def test_http_backend_checks_post_stop_queue_minima_without_leaking_earlier_zeroes():
+    def handler(request: httpx.Request) -> httpx.Response:
+        program = request.content.decode()
+        assert RUN_ID in program
+        assert "rollup='min'" in program
+        assert int(request.url.params["start"]) == int((NOW + timedelta(seconds=5)).timestamp() * 1000)
+        return httpx.Response(200, text="\n".join((
+            'event: metadata', 'data: {"tsId":"1","properties":{"sf_streamLabel":"queue_min_metrics"}}',
+            'event: metadata', 'data: {"tsId":"2","properties":{"sf_streamLabel":"queue_min_traces"}}',
+            'event: metadata', 'data: {"tsId":"3","properties":{"sf_streamLabel":"queue_min_logs"}}',
+            'event: data', 'data: {"data":[{"tsId":"1","value":0},{"tsId":"2","value":0},{"tsId":"3","value":0}]}',
+        )))
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    since = NOW + timedelta(seconds=5)
+    assert backend.collector_queue_minimum(
+        attempt_context(), since, NOW + timedelta(minutes=3), 2.0
+    ) == dict.fromkeys(SIGNALS, 0)
 
 
 def test_http_backend_keeps_sparse_failure_counter_unknown_without_companion_evidence():
@@ -1500,6 +1687,44 @@ def test_http_backend_defers_signalflow_until_the_ingestion_window_is_complete()
     assert backend.collector_snapshot(
         attempt_context(), NOW + timedelta(minutes=1), 2.0
     ) == snapshot(sent=None, failed=None, enqueue_failed=None, queue=None)
+
+
+def test_http_backend_queries_bounded_run_scoped_application_metric_values():
+    requested = ("rate_queue_depth", "search_requests_total", "search_rate_attempts_total")
+    labels = [
+        f'event: metadata\ndata: {{"tsId":"{index}","properties":{{"sf_streamLabel":"metric_{index}"}}}}'
+        for index in range(3)
+    ]
+    sse = "\n\n".join(labels + [
+        'event: data\ndata: {"data":[{"tsId":"0","value":36},'
+        '{"tsId":"1","value":880},{"tsId":"2","value":1530}]}'
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/signalflow/execute"
+        # Application-metric proof must use a completed historical window.
+        # Querying through the live tail can leave SignalFlow streaming past
+        # the per-request timeout and turn present metrics into query_error.
+        assert request.url.params["stop"] == str(int((NOW + timedelta(minutes=3)).timestamp() * 1000))
+        program = request.content.decode()
+        for metric in requested:
+            assert f"data('{metric}'" in program
+        assert f"filter('sregym.run.id', '{RUN_ID}')" in program
+        assert "filter('namespace', 'hotel-reservation')" in program
+        assert "filter('sregym.metric.source', 'sregym_prometheus_application')" in program
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    scope = ApplicationScope("Hotel Reservation", ("hotel-reservation",))
+    assert backend.query_application_metric_values(
+        requested, attempt_context(), scope, NOW + timedelta(minutes=5), 2.0,
+    ) == dict(zip(requested, (36.0, 880.0, 1530.0), strict=True))
+    with pytest.raises(ValueError):
+        backend.query_application_metric_values(("rate_queue_depth');drop()",), attempt_context(), scope,
+                                                NOW + timedelta(minutes=5), 2.0)
 
 
 def test_http_backend_closes_only_its_owned_client(monkeypatch):
@@ -1591,6 +1816,119 @@ def test_http_backend_continues_existing_log_job_until_complete():
         "searchJobResultsWithoutFieldsSummary",
         "searchJobResultsWithoutFieldsSummary",
     ]
+
+
+def test_http_backend_queries_only_run_scoped_pod_and_event_objects():
+    queries: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["operationName"] == "createSearchJob":
+            queries.append(body["variables"])
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": "object-job"}}})
+        return httpx.Response(200, json={"data": {"searchJob": {
+            "status": "DONE", "results": {"results": [["row"]]}
+        }}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment(SPLUNK_HEC_INDEX="main")),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    scope = ApplicationScope("hotel-reservation", ("hotel-reservation",))
+    assert backend.query_object("pods", attempt_context(), scope, "logs-connection-1", NOW, 2.0) == 1
+    assert backend.query_object("events", attempt_context(), scope, "logs-connection-1", NOW, 2.0) == 1
+    assert len(queries) == 2
+    assert all(item["connectionID"] == "logs-connection-1" for item in queries)
+    assert all(f'k8s.cluster.name="{RUN_ID}"' in str(item["query"]) for item in queries)
+    assert all('k8s.namespace.name="hotel-reservation"' in str(item["query"]) for item in queries)
+    assert 'sourcetype="kube:object:pods"' in str(queries[0]["query"])
+    assert 'sourcetype="kube:object:events"' in str(queries[1]["query"])
+    assert all(item["queryParameters"] == {
+        "timezone": "UTC", "earliest": str(int(NOW.timestamp())), "latest": str(int(NOW.timestamp()))
+    } for item in queries)
+    with pytest.raises(ValueError, match="approved"):
+        backend.query_object("secrets", attempt_context(), scope, "logs-connection-1", NOW, 2.0)
+
+
+def test_http_backend_returns_bounded_run_scoped_object_rows_for_causal_checks():
+    queries: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["operationName"] == "createSearchJob":
+            queries.append(body["variables"])
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": "causal-job"}}})
+        return httpx.Response(200, json={"data": {"searchJob": {
+            "status": "DONE",
+            "results": {
+                "fields": [{"name": "_time"}, {"name": "_raw"}],
+                "results": [["2026-09-25T18:02:00Z", '{"metadata":{"name":"audit-log-archiver"}}']],
+            },
+        }}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment(SPLUNK_HEC_INDEX="main")),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    rows = backend.query_scoped_examples(
+        "pods", attempt_context(), ApplicationScope("hotel-reservation", ("hotel-reservation",)),
+        "logs-connection-1", NOW, 2.0, limit=10, terms=("audit-log-archiver",),
+    )
+    assert rows == [{
+        "_time": "2026-09-25T18:02:00Z",
+        "_raw": '{"metadata":{"name":"audit-log-archiver"}}',
+    }]
+    assert len(queries) == 1
+    assert queries[0]["connectionID"] == "logs-connection-1"
+    assert f'k8s.cluster.name="{RUN_ID}"' in str(queries[0]["query"])
+    assert 'k8s.namespace.name="hotel-reservation"' in str(queries[0]["query"])
+    assert 'sourcetype="kube:object:pods"' in str(queries[0]["query"])
+    assert '"audit-log-archiver"' in str(queries[0]["query"])
+    assert "| head 10" in str(queries[0]["query"])
+    assert queries[0]["queryParameters"] == {
+        "timezone": "UTC", "earliest": str(int(NOW.timestamp())), "latest": str(int(NOW.timestamp()))
+    }
+    with pytest.raises(ValueError, match="approved"):
+        backend.query_scoped_examples(
+            "secrets", attempt_context(), ApplicationScope("hotel-reservation", ("hotel-reservation",)),
+            "logs-connection-1", NOW, 2.0,
+        )
+    with pytest.raises(ValueError, match="limit"):
+        backend.query_scoped_examples(
+            "pods", attempt_context(), ApplicationScope("hotel-reservation", ("hotel-reservation",)),
+            "logs-connection-1", NOW, 2.0, limit=1001,
+        )
+    with pytest.raises(ValueError, match="search term"):
+        backend.query_scoped_examples(
+            "pods", attempt_context(), ApplicationScope("hotel-reservation", ("hotel-reservation",)),
+            "logs-connection-1", NOW, 2.0, terms=('" OR index="*',),
+        )
+
+
+def test_http_backend_normalizes_named_field_value_log_rows():
+    queries = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        operation = payload["operationName"]
+        if operation == "createSearchJob":
+            queries.append(payload["variables"]["query"])
+            return httpx.Response(200, json={"data": {"createSearchJob": {"id": "named-job"}}})
+        return httpx.Response(200, json={"data": {"searchJob": {
+            "status": "DONE", "results": {"fields": [], "results": [[
+                {"field": "_time", "value": "2026-09-25T18:02:00Z"},
+                {"field": "_raw", "value": "safe-event"},
+            ]]},
+        }}})
+
+    backend = SplunkHttpBackend(
+        SplunkConfig.from_env(valid_environment()),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert backend.query_scoped_examples(
+        "logs", attempt_context(), ApplicationScope("social-network", ("social-network",)),
+        "connection-default", NOW, 2.0, container_name="frontend-proxy",
+    ) == [{"_time": "2026-09-25T18:02:00Z", "_raw": "safe-event"}]
+    assert 'k8s.container.name="frontend-proxy"' in queries[0]
 
 
 def test_http_backend_continues_existing_trace_job_until_complete():

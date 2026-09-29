@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: search_rate_retry_collapse_hotel_reservation
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/search_rate_retry_collapse.py
+candidate_evidence:
+  - fact: "A transient burst fills rate's backend queue, then search retries expired rate calls"
+    signal: traces
+    query_focus: "search-to-rate spans show repeated attempts, deadline exceeded, and post-burst persistence"
+  - fact: "Internal rate requests stay above backend capacity after external traffic normalizes"
+    signal: metrics
+    query_focus: "search/rate request rate, queue length, error/latency, and external workload rate over time"

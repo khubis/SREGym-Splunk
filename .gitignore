@@ -123,6 +123,8 @@ celerybeat.pid
 
 # Environments
 .env
+# Local Assistant authentication material
+.local/
 .venv
 env/
 venv/

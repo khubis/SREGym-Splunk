@@ -5,12 +5,14 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from sregym.conductor.problem_sets import SREGYM_LITE_PROBLEMS
 
@@ -20,10 +22,14 @@ SCORECARD_FILENAME = "scorecard.md"
 RESUME_FILENAME = "resume.csv"
 AUDIT_FILENAME = "golden_telemetry.json"
 FINAL_ANSWER_FILENAME = "final_answer.md"
+SPLUNK_ASSESSMENT_FILENAME = "splunk_visible_assessment.json"
 _AUDIT_STATUSES = frozenset({"confirmed", "partial", "missing", "not_checked"})
 _SIGNALS = frozenset({"metrics", "traces", "logs", "kubernetes_events"})
 _WINDOW_RE = re.compile(
     r"Telemetry time window:\s*(?P<start>\S+)\s+through\s+(?P<end>\S+?),\s+inclusive\."
+)
+_ANSWER_TIMESTAMP_RE = re.compile(
+    r"(?<![A-Za-z0-9])\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)"
 )
 _SECRET_MARKERS = ("authorization:", "bearer ", "x-sf-token", "hec_token", "token=")
 
@@ -211,10 +217,66 @@ def _write_final_answer(run_dir: Path, answer: str | None) -> Path | None:
     return path
 
 
+def _causal_proof_summary(causal: dict[str, Any]) -> str:
+    """Surface bounded causal counts without copying raw MELT into the scorecard."""
+    details: list[str] = []
+    check_id = causal.get("check_id")
+    if isinstance(check_id, str) and check_id:
+        details.append(check_id)
+    for key, value in sorted(causal.items()):
+        if key.endswith("_count") and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            details.append(f"{key}={value}")
+        elif key.endswith("_confirmed") and isinstance(value, bool):
+            details.append(f"{key}={str(value).lower()}")
+    interpretation = causal.get("interpretation")
+    if isinstance(interpretation, str) and interpretation.strip():
+        details.append(interpretation.strip())
+    return "; ".join(details) or "Causal check recorded"
+
+
+def _answer_window_warning(answer: str | None, instructions: Any) -> str | None:
+    """Flag explicit answer timestamps outside the saved prompt, without regrading."""
+    if answer is None or not isinstance(instructions, str):
+        return None
+    window = _WINDOW_RE.search(instructions)
+    if window is None:
+        return None
+    try:
+        start = datetime.fromisoformat(window.group("start").replace("Z", "+00:00"))
+        end = datetime.fromisoformat(window.group("end").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    cited = []
+    for found in _ANSWER_TIMESTAMP_RE.findall(answer):
+        try:
+            cited.append(datetime.fromisoformat(found.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    if any(value < start for value in cited):
+        return "final answer cites telemetry before the prompt window"
+    if any(value > end for value in cited):
+        return "final answer cites telemetry after the prompt window"
+    return None
+
+
 def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
     metadata = _read_json(run_dir / "run_metadata.json")
+    request_path = run_dir / "assistant_v3" / "request.json"
+    request = _read_json(request_path)
     answer, _, sequence = _final_answer(run_dir)
     judge, judge_path, result_row = _judge_result(run_dir, answer, sequence)
+    assessment_path = run_dir / SPLUNK_ASSESSMENT_FILENAME
+    if assessment_path.exists():
+        assessment = _read_json(assessment_path)
+        if (
+            assessment.get("schema") != "sregym.splunk_visible_assessment.v1"
+            or assessment.get("case_id") != metadata.get("problem_id")
+            or assessment.get("answer_sha256") != (_sha256_text(answer) if answer is not None else None)
+            or assessment.get("benchmark_judge_sha256") != (_sha256_file(judge_path) if judge_path else None)
+        ):
+            raise CampaignArtifactError("Splunk-visible assessment provenance differs from the graded answer")
+    else:
+        assessment = None
     answer_path = _write_final_answer(run_dir, answer)
     audit_path = run_dir / AUDIT_FILENAME
     audit = _read_json(audit_path) if audit_path.exists() else None
@@ -222,10 +284,81 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
     if not trajectory_path.exists():
         nested_trajectory = run_dir / "trajectory" / "trajectory.json"
         trajectory_path = nested_trajectory if nested_trajectory.exists() else trajectory_path
+    metrics_path = run_dir / "metrics.json"
+    if not metrics_path.exists():
+        raise CampaignArtifactError("Assistant attempt is missing derived trace metrics")
+    metrics = _read_json(metrics_path)
+    if metrics.get("schema") != "sregym.assistant_v3.metrics.v1":
+        raise CampaignArtifactError("Assistant trace metrics have an unexpected schema")
+    for key in ("tool_calls", "failed_tool_results"):
+        value = metrics.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CampaignArtifactError(f"Assistant trace metrics have invalid {key}")
+    duration_ms = metrics.get("agent_duration_ms")
+    if (
+        not isinstance(duration_ms, (int, float))
+        or isinstance(duration_ms, bool)
+        or not math.isfinite(duration_ms)
+        or duration_ms < 0
+    ):
+        raise CampaignArtifactError("Assistant trace metrics have invalid duration")
+    total_tokens = metrics.get("total_tokens")
+    if total_tokens is not None and (
+        not isinstance(total_tokens, int) or isinstance(total_tokens, bool) or total_tokens < 0
+    ):
+        raise CampaignArtifactError("Assistant trace metrics have invalid token count")
     problem_id = metadata.get("problem_id") or run_dir.parent.name
     attempt = metadata.get("attempt")
     if not isinstance(problem_id, str) or not problem_id or not isinstance(attempt, int):
         raise CampaignArtifactError("run metadata is missing problem identity or attempt")
+    pre_agent_path = run_dir / "splunk_lite_pre_agent.json"
+    pre_agent = None
+    if request.get("action_profile_id") == "sregym-symptom-window-v1":
+        if not pre_agent_path.exists():
+            if answer is not None:
+                raise CampaignArtifactError("guided attempt lacks ready pre-agent evidence")
+            pre_agent_path = None
+        else:
+            pre_agent = _read_json(pre_agent_path)
+            match = _WINDOW_RE.search(str(request.get("action_instructions", "")))
+            if (
+                pre_agent.get("schema") != "sregym.splunk_lite_pre_agent.v1"
+                or pre_agent.get("case_id") != problem_id
+                or pre_agent.get("run_id") != metadata.get("run_id")
+                or (
+                    answer is not None
+                    and (
+                        match is None
+                        or pre_agent.get("status") not in {"ready", "ready_data_limited"}
+                        or (
+                            pre_agent.get("status") == "ready_data_limited"
+                            and (
+                                pre_agent.get("causal", {}).get("visibility")
+                                not in {"requires_additional_access", "partially_splunk_observable"}
+                                or not pre_agent.get("causal", {}).get("access_gap")
+                                or not pre_agent.get("causal", {}).get("remedy")
+                            )
+                        )
+                        or pre_agent.get("window") != {"start": match.group("start"), "end": match.group("end")}
+                    )
+                )
+            ):
+                raise CampaignArtifactError("guided attempt has mismatched or incomplete pre-agent evidence")
+    elif not pre_agent_path.exists():
+        pre_agent_path = None
+    pre_agent_causal = pre_agent.get("causal") if isinstance(pre_agent, dict) else None
+    if not isinstance(pre_agent_causal, dict):
+        pre_agent_causal = None
+    delivery_path = run_dir / "splunk_lite_delivery.json"
+    if delivery_path.exists():
+        delivery_proof = _read_json(delivery_path)
+        if (
+            delivery_proof.get("schema") != "sregym.splunk_lite_delivery.v1"
+            or delivery_proof.get("case_id") != problem_id
+        ):
+            raise CampaignArtifactError("Splunk Lite delivery proof does not match the attempt")
+    else:
+        delivery_path = None
     record: dict[str, Any] = {
         "schema": "sregym.assistant_v3.campaign_progress.v1",
         "recorded_at": _utc_now(),
@@ -233,6 +366,9 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
         "attempt": attempt,
         "run_path": _relative(batch_dir, run_dir),
         "status": str(metadata.get("classification") or _read_json(run_dir / "assistant_v3" / "terminal.json").get("outcome")),
+        "telemetry_scope_warning": metadata.get("telemetry_scope_warning"),
+        "answer_window_warning": _answer_window_warning(answer, request.get("action_instructions")),
+        "run_metadata_path": _relative(batch_dir, run_dir / "run_metadata.json"),
         "score": judge.get("score") if judge else None,
         "verdict": judge.get("verdict") if judge else "ungraded",
         "rationale": judge.get("rationale") if judge else "No completed judge result is available.",
@@ -241,8 +377,38 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
         "judge_path": _relative(batch_dir, judge_path),
         "judge_sha256": _sha256_file(judge_path) if judge_path is not None else None,
         "trajectory_path": _relative(batch_dir, trajectory_path) if trajectory_path.exists() else None,
+        "metrics_path": _relative(batch_dir, metrics_path),
+        "metrics_sha256": _sha256_file(metrics_path),
+        "agent_duration_ms": duration_ms,
+        "total_tokens": total_tokens,
+        "tool_calls": metrics["tool_calls"],
+        "failed_tool_results": metrics["failed_tool_results"],
+        "native_trace_path": _relative(batch_dir, run_dir / "assistant_v3" / "events.jsonl"),
+        "prompt_path": _relative(batch_dir, request_path),
+        "pre_agent_path": _relative(batch_dir, pre_agent_path),
+        "pre_agent_sha256": _sha256_file(pre_agent_path) if pre_agent_path is not None else None,
+        "splunk_score": assessment.get("score") if assessment is not None else None,
+        "splunk_verdict": assessment.get("verdict") if assessment is not None else "unverified",
+        "splunk_rationale": assessment.get("rationale") if assessment is not None else "No secondary assessment.",
+        "splunk_visibility": (
+            assessment.get("visibility") if assessment is not None else
+            pre_agent.get("causal", {}).get("visibility", "undetermined") if pre_agent is not None else "undetermined"
+        ),
+        "splunk_access_gap": (
+            assessment.get("access_gap") if assessment is not None else
+            " ".join(filter(None, (
+                pre_agent.get("causal", {}).get("access_gap"),
+                pre_agent.get("causal", {}).get("remedy"),
+            ))) if pre_agent is not None else "Not assessed."
+        ),
+        "splunk_assessment_path": _relative(batch_dir, assessment_path) if assessment is not None else None,
+        "splunk_assessment_sha256": _sha256_file(assessment_path) if assessment is not None else None,
         "audit_path": _relative(batch_dir, audit_path) if audit is not None else None,
-        "audit_status": str(audit.get("status")) if audit is not None else "not_checked",
+        "audit_status": (
+            str(audit.get("status")) if audit is not None else
+            f"pre-agent {pre_agent_causal['status']}" if pre_agent_causal and pre_agent_causal.get("status") else
+            "not_checked"
+        ),
         "audit_summary": (
             " ".join(
                 str(item.get("summary", "")).strip()
@@ -250,7 +416,11 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
                 if isinstance(item, dict) and str(item.get("summary", "")).strip()
             )
             if audit is not None
-            else "Golden telemetry has not been checked."
+            else (
+                f"{_causal_proof_summary(pre_agent_causal)}; "
+                "independent post-grade audit pending."
+                if pre_agent_causal is not None else "Golden telemetry has not been checked."
+            )
         ),
         "access_note": (
             str(audit.get("access_note", "")).strip()
@@ -262,6 +432,8 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
             )
         ),
         "audit_sha256": _sha256_file(audit_path) if audit is not None else None,
+        "delivery_proof_path": _relative(batch_dir, delivery_path),
+        "delivery_proof_sha256": _sha256_file(delivery_path) if delivery_path is not None else None,
         "result_row": result_row,
     }
     fingerprint_value = {key: value for key, value in record.items() if key not in {"recorded_at", "result_row"}}
@@ -323,17 +495,24 @@ def _render_scorecard(batch_dir: Path, records: list[dict[str, Any]]) -> bytes:
     lines = [
         "# Assistant v3 SREGym-Lite Pilot",
         "",
-        "Derived from immutable per-attempt artifacts. Golden telemetry is checked only after grading and never changes the score.",
+        "Derived from immutable per-attempt artifacts. Pre-agent causal checks and independent post-grade audits are labeled separately; neither changes the score.",
         "",
-        "| Incident | Attempt | Status | Score | Reason | Rationale | Golden telemetry | Access / ingestion note | Provenance |",
-        "|---|---:|---|---:|---|---|---|---|---|",
+        "| Incident | Attempt | Status | Score | Reason | Rationale | Runtime / tokens / tools (failed) | Golden telemetry | Access / ingestion note | Splunk-visible score | Splunk visibility / gap | Provenance |",
+        "|---|---:|---|---:|---|---|---|---|---|---:|---|---|",
     ]
     for record in records:
         provenance = [
             _link(report_dir, batch_dir, record.get("answer_path"), "answer"),
+            _link(report_dir, batch_dir, record.get("prompt_path"), "starter prompt"),
+            _link(report_dir, batch_dir, record.get("run_metadata_path"), "run metadata"),
             _link(report_dir, batch_dir, record.get("judge_path"), "judge"),
+            _link(report_dir, batch_dir, record.get("native_trace_path"), "native trace"),
             _link(report_dir, batch_dir, record.get("trajectory_path"), "trace"),
+            _link(report_dir, batch_dir, record.get("metrics_path"), "metrics"),
+            _link(report_dir, batch_dir, record.get("pre_agent_path"), "pre-agent proof"),
+            _link(report_dir, batch_dir, record.get("splunk_assessment_path"), "Splunk judge"),
             _link(report_dir, batch_dir, record.get("audit_path"), "telemetry proof"),
+            _link(report_dir, batch_dir, record.get("delivery_proof_path"), "delivery"),
         ]
         score = "—" if record.get("score") is None else f"{float(record['score']):.1f}"
         lines.append(
@@ -342,15 +521,36 @@ def _render_scorecard(batch_dir: Path, records: list[dict[str, Any]]) -> bytes:
                 [
                     _markdown_text(record["problem_id"]),
                     str(record["attempt"]),
-                    _markdown_text(record["status"]),
+                    _markdown_text(
+                        record["status"] + (
+                            " (" + "; ".join(
+                                label for enabled, label in (
+                                    (record.get("telemetry_scope_warning"), "scope warning"),
+                                    (record.get("answer_window_warning"), "answer-window warning"),
+                                ) if enabled
+                            ) + ")"
+                            if record.get("telemetry_scope_warning") or record.get("answer_window_warning")
+                            else ""
+                        )
+                    ),
                     score,
                     _markdown_text(record["verdict"]),
                     _markdown_text(record["rationale"], limit=220),
+                    _markdown_text(
+                        f"{float(record['agent_duration_ms']) / 1000:.1f}s / "
+                        f"{record['total_tokens'] if record['total_tokens'] is not None else 'unreported'} / "
+                        f"{record['tool_calls']} / {record['failed_tool_results']}"
+                    ),
                     _markdown_text(
                         f"{record['audit_status']} — {record.get('audit_summary', '')}",
                         limit=260,
                     ),
                     _markdown_text(record.get("access_note"), limit=220),
+                    "unverified" if record.get("splunk_score") is None else f"{float(record['splunk_score']):.1f}",
+                    _markdown_text(
+                        f"{record.get('splunk_visibility', 'undetermined')} — {record.get('splunk_access_gap', '')}",
+                        limit=220,
+                    ),
                     " · ".join(item for item in provenance if item) or "—",
                 ]
             )
@@ -410,6 +610,63 @@ def checkpoint_attempt(batch_dir: Path | str, run_dir: Path | str) -> Path:
     if prior is None or prior.get("fingerprint") != record["fingerprint"]:
         _append_record(ledger, record)
     return rebuild_campaign(batch)
+
+
+def record_splunk_visible_assessment(
+    batch_dir: Path | str,
+    run_dir: Path | str,
+    *,
+    score: float,
+    verdict: str,
+    rationale: str,
+    visibility: str,
+    access_gap: str,
+    judge_model: str,
+    judge_backend: str,
+    raw_judge: Mapping[str, Any],
+) -> Path:
+    """Save a separately labeled judgment; never alter the benchmark result."""
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 100:
+        raise CampaignArtifactError("Splunk-visible score must be a finite value from 0 to 100")
+    if visibility not in {
+        "fully_splunk_observable", "partially_splunk_observable",
+        "requires_additional_access", "undetermined",
+    }:
+        raise CampaignArtifactError("invalid Splunk visibility classification")
+    if not all(isinstance(value, str) and value.strip() for value in (
+        verdict, rationale, access_gap, judge_model, judge_backend,
+    )):
+        raise CampaignArtifactError("Splunk-visible judgment provenance is incomplete")
+    if not isinstance(raw_judge, Mapping):
+        raise CampaignArtifactError("raw Splunk-visible judge result must be an object")
+    run = Path(run_dir).resolve()
+    answer, _, sequence = _final_answer(run)
+    benchmark_judge, judge_path, _ = _judge_result(run, answer, sequence)
+    if answer is None or benchmark_judge is None or judge_path is None:
+        raise CampaignArtifactError("Splunk-visible judgment requires a graded Assistant answer")
+    metadata = _read_json(run / "run_metadata.json")
+    payload = {
+        "schema": "sregym.splunk_visible_assessment.v1",
+        "rubric_version": "splunk-visible-rca-v1",
+        "case_id": metadata.get("problem_id"),
+        "answer_sha256": _sha256_text(answer),
+        "benchmark_judge_sha256": _sha256_file(judge_path),
+        "score": float(score),
+        "verdict": verdict.strip(),
+        "rationale": rationale.strip(),
+        "visibility": visibility,
+        "access_gap": access_gap.strip(),
+        "judge_model": judge_model.strip(),
+        "judge_backend": judge_backend.strip(),
+        "raw_judge": dict(raw_judge),
+    }
+    serialized = _json_bytes(payload)
+    if any(marker in serialized.decode().lower() for marker in _SECRET_MARKERS):
+        raise CampaignArtifactError("Splunk-visible judgment contains credential-like text")
+    path = run / SPLUNK_ASSESSMENT_FILENAME
+    _atomic_write(path, serialized)
+    checkpoint_attempt(batch_dir, run)
+    return path
 
 
 def _parse_utc(value: datetime) -> datetime:

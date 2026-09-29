@@ -15,6 +15,9 @@ results/<batch>/assistant_v3/<problem_id>/run_<attempt>/
 ├── failure.json                 # only for non-success terminal outcomes
 ├── observability/
 │   └── delivery.json
+├── splunk_lite_delivery.json   # optional post-run representative query proof
+├── splunk_lite_pre_agent.json   # published only after agent exit; never agent-mounted while running
+├── splunk_visible_assessment.json # post-grade secondary result, or unverified
 ├── trajectory/
 │   └── trajectory.json          # validated ATIF 1.7
 ├── <existing SRE Gym judge/result artifacts>
@@ -45,6 +48,8 @@ Contains no headers or credentials:
 ```
 
 The existing artifact publisher may replace only the semantic `problem_id` from opaque to canonical. Prompt text must never contain either ID.
+
+For a symptom-guided exploratory run, `prompt_profile_id` continues to identify the unchanged frozen diagnosis body, while a separate `action_profile_id: sregym-symptom-window-v1` identifies the added instruction. `action_instructions` includes only the actual UTC window and one reviewed user-observable symptom. `comparable` is false even with a full deployment profile. A time-only baseline request omits the additional action-profile field and symptom. Both preserve the exact frozen diagnosis body and its hash.
 
 ## `events.jsonl`
 
@@ -110,6 +115,16 @@ No token, raw Authorization header, HEC endpoint query string, telemetry payload
 Contains the serialized `DeliveryReport` from `contracts/observability-provider.md`: opening and closing four-signal readiness, first-visible lag, collector sent/send-failed/enqueue-failed deltas, queue high-water/final sizes, drain status, and overall validity. Missing required counters are `null`; the only exception is a documented sparse Collector failure counter whose absent series has an initial value of zero and whose matching sent and queue series are both present in the same successful snapshot. It contains counts and safe identifiers only, not signal payloads.
 
 An invalid post-execution delivery report changes the attempt classification to `infrastructure_invalid` and sets `included_in_diagnosis_pass_rate: false`; it does not remove the Assistant stream, diagnosis, or judge result.
+
+## `splunk_lite_delivery.json`
+
+Optional, atomically written after a registered Lite attempt. Stores the exact incident UTC window, opaque run ID, configured Logs connection, namespace, and bounded count/status for metrics, traces, container logs, Kubernetes events, pod objects, and event objects. It never stores returned payload bodies, tokens, or backend exception text. `present` means a representative same-window query found a result; it is **not** root-cause proof or exhaustive delivery assurance. `missing` and `query_error` remain distinct. `source_comparison` and `oracle_evidence` remain `unverified` until their separate case-specific reviews. The scorecard links the file and hashes it without altering the benchmark score.
+
+## `splunk_lite_pre_agent.json` and secondary assessment
+
+The shared verifier checks pre-agent evidence from each case's reviewed manifest. Its oracle-aware result stays in runner memory (or a separate trusted directory) while Assistant runs: the agent container mounts its run-artifact directory as `/logs`, so writing this proof there before agent exit would leak the answer. Only after the agent has exited is `splunk_lite_pre_agent.json` atomically published into the run directory. It contains the frozen window, destination identity, manifest version/hash, representative signal results, and each causal check's fact ID, sanitized source and Splunk queries, bounded count/timestamp/expected-pattern match, status (`present`, `missing_at_source`, `missing_in_splunk`, `query_error`, or `unverified`), and `essential|full_oracle_only` classification. Raw telemetry payloads, secrets, oracle answer text, and full API responses are never persisted or passed to Assistant. A symptom-guided result without a matching `ready` proof is not a valid scored result.
+
+`splunk_visible_assessment.json` is produced only after the unchanged benchmark judge. It records a separately versioned rubric, judge backend/model, the reviewed set of verified reachable facts, raw secondary judge output/provenance, score or `unverified`, visibility classification, missing facts, and a concrete path to close each gap (approved object receiver addition versus specific Kubernetes/API access). It cannot replace or mutate the benchmark judge file. The scorecard links both raw judge outputs, the raw saved Assistant final answer, request, native/normalized trace, and these proofs; absent fields remain `unverified`.
 
 ## `metrics.json`
 

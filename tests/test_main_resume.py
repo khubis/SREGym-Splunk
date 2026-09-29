@@ -31,3 +31,14 @@ def test_legacy_diagnosis_only_row_is_rerun():
 
     assert resume_row_is_complete(diagnosis_only) is False
     assert resume_row_is_complete(both_stages) is True
+
+
+def test_scored_but_infrastructure_invalid_or_unpublished_attempt_is_rerun():
+    rows = [
+        _row(1, run_status="complete", infrastructure_invalid="True"),
+        _row(2, run_status="complete", included_in_diagnosis_pass_rate="False"),
+        _row(3, run_status="complete", artifact_finalization_failed="True"),
+        _row(4, run_status="complete", cleanup_failed="True"),
+    ]
+
+    assert complete_resume_rows(rows, requested_attempts=4) == {}

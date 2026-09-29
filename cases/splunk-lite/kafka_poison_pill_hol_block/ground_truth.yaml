@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: kafka_poison_pill_hol_block
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/kafka_poison_pill_hol_block.py
+candidate_evidence:
+  - fact: "orders-validator logs invalid JSON at offset 20 and repeated partition remains paused"
+    signal: logs
+    query_focus: "orders-validator validation failure, offset 20, and partition remains paused"
+  - fact: "Committed group offset, lag, and poison record require Kafka data-plane inspection if logs are insufficient"
+    signal: other_subsystem_api
+    query_focus: "orders-fulfillment topic, orders-validator consumer group offset/lag and record payload"

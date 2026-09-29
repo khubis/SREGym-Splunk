@@ -93,6 +93,7 @@ class DeliveryReport:
     queue_final_size: dict[SignalName, int | None]
     drained: bool
     valid: bool
+    queue_drain_minimum: dict[SignalName, int | None] | None = None
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)

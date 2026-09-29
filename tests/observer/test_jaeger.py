@@ -81,3 +81,23 @@ def test_predeploy_redirect_does_not_restart_absent_application_deployments():
 
     commands = [call.args[0] for call in jaeger.run_cmd.call_args_list]
     assert not any(command.startswith("kubectl rollout restart deployment ") for command in commands)
+
+
+def test_trace_redirect_can_preserve_app_local_fault_target_deployment():
+    jaeger = _jaeger_with_recorded_commands()
+    jaeger.run_cmd.side_effect = lambda command: (
+        '{"items":[]}' if command.endswith("get deployment -o json") else ""
+    )
+
+    jaeger.create_external_name_service(
+        "social-network", restart_deployments=True, preserve_deployments=True,
+    )
+
+    commands = [call.args[0] for call in jaeger.run_cmd.call_args_list]
+    assert not any(command.startswith("kubectl delete deployment ") for command in commands)
+    assert not any(command.startswith("kubectl delete statefulset ") for command in commands)
+    assert "kubectl delete svc -n social-network jaeger --ignore-not-found" in commands
+    assert any(
+        command.startswith("kubectl create service externalname jaeger -n social-network")
+        for command in commands
+    )

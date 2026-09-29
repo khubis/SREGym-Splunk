@@ -1,0 +1,2 @@
+# This draft embeds the frozen benchmark prompt verbatim, including one trailing space.
+cases/splunk-lite/cronjob_sidecar_blocks_completion_hotel_reservation/proposed_starter_prompt.md whitespace=-trailing-space

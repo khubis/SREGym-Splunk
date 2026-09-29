@@ -338,6 +338,79 @@ def test_finish_problem_audits_delivery_before_cleanup(bare):
     assert events[1] == "cleanup"
 
 
+def test_splunk_delivery_quiesces_workload_before_collector_drain(bare):
+    events = []
+    _finish_ready_bare(bare, events)
+    provider = RecordingProvider(events)
+    context = AttemptContext(
+        run_id="anon_0123456789abcdef0123456789abcdef",
+        profile="svelte",
+        comparable=False,
+        attempt_started_at=datetime.now(UTC),
+    )
+    bare.app = SimpleNamespace(
+        app_name="Hotel Reservation", namespace="hotel-reservation",
+        stop_workload=lambda: events.append("quiesce"),
+    )
+    bare.bind_observability_attempt(provider, context)
+
+    bare._finish_problem()
+
+    assert events[0] == "quiesce"
+    assert events[1][0] == "finish"
+    assert events[2] == "cleanup"
+
+
+def test_splunk_delivery_quiesces_problem_owned_workload_before_collector_drain(bare):
+    events = []
+    _finish_ready_bare(bare, events)
+    provider = RecordingProvider(events)
+    context = AttemptContext(
+        run_id="anon_0123456789abcdef0123456789abcdef",
+        profile="svelte",
+        comparable=False,
+        attempt_started_at=datetime.now(UTC),
+    )
+    bare.app = SimpleNamespace(
+        app_name="Hotel Reservation", namespace="hotel-reservation",
+        stop_workload=lambda: events.append("stop_app_default_workload"),
+    )
+    bare.problem = SimpleNamespace(stop_workload=lambda: events.append("stop_problem_workload"))
+    bare.bind_observability_attempt(provider, context)
+
+    bare._finish_problem()
+
+    assert events[0] == "stop_problem_workload"
+    assert "stop_app_default_workload" not in events
+    assert events[1][0] == "finish"
+    assert events[2] == "cleanup"
+
+
+def test_splunk_delivery_marks_failed_quiescence_invalid_but_still_cleans_up(bare):
+    events = []
+    _finish_ready_bare(bare, events)
+    provider = RecordingProvider(events)
+    context = AttemptContext(
+        run_id="anon_0123456789abcdef0123456789abcdef",
+        profile="svelte",
+        comparable=False,
+        attempt_started_at=datetime.now(UTC),
+    )
+
+    def fail_stop():
+        raise RuntimeError("workload stop failed")
+
+    bare.app = SimpleNamespace(app_name="app", namespace="namespace", stop_workload=fail_stop)
+    bare.bind_observability_attempt(provider, context)
+
+    bare._finish_problem()
+
+    assert bare.results["infrastructure_invalid"] is True
+    assert bare.results["included_in_diagnosis_pass_rate"] is False
+    assert events[0][0] == "finish"
+    assert events[1] == "cleanup"
+
+
 def test_finish_problem_cleans_up_after_classified_delivery_failure(bare):
     events = []
     _finish_ready_bare(bare, events)
@@ -417,6 +490,7 @@ def test_start_problem_places_provider_prepare_before_baseline_and_readiness_aft
         requires_khaos=lambda: False,
     )
     bare.problem_id = "problem"
+    bare.incident_ended_at = datetime.now(UTC)
     bare.problems = SimpleNamespace(get_problem_instance=lambda problem_id: problem)
     bare.kubectl = SimpleNamespace(is_emulated_cluster=lambda: False)
     bare._submission_lock = threading.RLock()
@@ -434,6 +508,9 @@ def test_start_problem_places_provider_prepare_before_baseline_and_readiness_aft
     bare.deploy_app = lambda: events.append("deploy")
 
     def advance(start_index):
+        assert bare.incident_started_at.tzinfo == UTC
+        assert bare.incident_started_at >= context.attempt_started_at
+        assert bare.incident_ended_at is None
         events.append("fault")
         bare.submission_stage = "diagnosis"
 
@@ -441,6 +518,7 @@ def test_start_problem_places_provider_prepare_before_baseline_and_readiness_aft
     monkeypatch.setattr(conductor_mod, "DetectionOracle", lambda selected_problem: object())
 
     async def baseline_sleep(seconds):
+        assert getattr(bare, "incident_started_at", None) is None
         events.append("baseline")
 
     monkeypatch.setattr(conductor_mod.asyncio, "sleep", baseline_sleep)

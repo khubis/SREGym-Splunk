@@ -1,0 +1,6 @@
+schema: sregym.splunk_lite_prompt.v2
+profile_id: sregym-stratus-diagnosis-v1
+application: hotel_reservation
+window: runtime_incident_utc
+symptom: Hotel Reservation recommendation requests are timing out.
+source_observation: Pre-agent caller timeouts on recommendation requests.

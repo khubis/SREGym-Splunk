@@ -1,0 +1,11 @@
+schema: sregym.splunk_lite_ground_truth.v1
+problem_id: secret_rotation_stale_env_credentials_astronomy_shop
+review_status: pending_live_verification
+oracle_source: sregym/conductor/problems/secret_rotation_stale_env_credentials.py
+candidate_evidence:
+  - fact: "Product-catalog pod predates credential rotation and retains its startup environment"
+    signal: pods
+    query_focus: "product-catalog pod startTime and DB_CONNECTION_STRING secretKeyRef metadata; never save value"
+  - fact: "PostgreSQL and Secret credentials rotated while the running product-catalog process did not refresh"
+    signal: other_kubernetes_api
+    query_focus: "authorized Secret resourceVersion and backend credential state versus pod lifetime; never export secret value"
