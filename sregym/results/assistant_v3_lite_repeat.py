@@ -12,6 +12,7 @@ import csv
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,18 @@ _REQUIRED = (
 )
 _GIB = 1024**3
 _EXPECTED_CHECKS = frozenset({"metrics", "traces", "logs", "kubernetes_events", "pods", "events"})
+_SUMMARY_LINKS = {
+    "README.md": "review",
+    "starter_prompt.md": "prompt",
+    "final_answer.md": "answer",
+    "benchmark_ground_truth.md": "oracle",
+    "splunk_visible_ground_truth.md": "Splunk limits",
+    "judge_raw.csv": "judge",
+    "verification.md": "evidence",
+    "atif_trace.json": "ATIF",
+    "native_trace.jsonl": "native trace",
+    "rubric_and_metrics.md": "metrics",
+}
 
 
 def resolve_environment(source: Mapping[str, str], *, profile: str) -> dict[str, str]:
@@ -186,6 +199,87 @@ def write_selection_report(report: Path, selected: Mapping[str, Path], missing: 
     temporary.replace(report)
 
 
+def _safe_status(value: object) -> str:
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) else "unverified"
+
+
+def write_campaign_summary(
+    report: Path, selected: Mapping[str, Path], expected: Sequence[str], batches: Sequence[Path]
+) -> None:
+    """Summarize saved outcomes without grading or silently omitting failed cases."""
+    lines = [
+        "# Assistant V3 SREGym-Lite campaign",
+        "",
+        "This `svelte`, symptom-guided, Splunk-only pilot is **not leaderboard-comparable**. "
+        "Scores are from the unchanged benchmark judge; Splunk-visible numeric grading is unverified.",
+        "",
+        "| Case | Outcome | Benchmark /100 | Pre-agent causal check | Evidence and raw results |",
+        "|---|---|---:|---|---|",
+    ]
+    scores: list[float] = []
+    invalid_count = 0
+    for case_id in expected:
+        if case_id in selected:
+            folder = report.parent / "by-case" / case_id
+            required_files = (*_SUMMARY_LINKS, "manifest.json", "pre_agent_proof.json")
+            if any(not (folder / name).is_file() for name in required_files):
+                raise RepeatError(f"incomplete case dossier for {case_id}")
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            proof = json.loads((folder / "pre_agent_proof.json").read_text(encoding="utf-8"))
+            if manifest.get("case_id") != case_id:
+                raise RepeatError(f"case dossier identity mismatch for {case_id}")
+            score = float(manifest["benchmark_score"])
+            if not 0 <= score <= 100:
+                raise RepeatError(f"invalid benchmark score in case dossier for {case_id}")
+            scores.append(score)
+            causal = proof.get("causal", {})
+            evidence = _safe_status(causal.get("status"))
+            links = " · ".join(f"[{label}](by-case/{case_id}/{name})" for name, label in _SUMMARY_LINKS.items())
+            lines.append(f"| {case_id} | valid | {score:g} | {evidence} | {links} |")
+            continue
+        attempts = [
+            run
+            for batch in batches
+            for run in sorted((batch / "assistant_v3" / case_id).glob("run_*"))
+            if run.is_dir()
+        ]
+        if not attempts:
+            lines.append(f"| {case_id} | missing | — | — | — |")
+            continue
+        invalid_count += 1
+        latest = attempts[-1]
+        metadata_path = latest / "run_metadata.json"
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                metadata = {}
+            status = _safe_status(metadata.get("classification")) if isinstance(metadata, dict) else "unverified"
+            if status == "unverified":
+                status = "incomplete"
+            if status == "completed":
+                status = "delivery_invalid"
+            link = f"[attempt metadata]({os.path.relpath(metadata_path, report.parent)})"
+        else:
+            status, link = "incomplete", "—"
+        lines.append(f"| {case_id} | {status} | — | — | {link} |")
+    attempt_label = "attempt" if len(scores) == 1 else "attempts"
+    mean = (
+        f"{sum(scores) / len(scores):g}/100 across {len(scores)} valid {attempt_label}"
+        if scores else "unavailable (0 valid attempts)"
+    )
+    lines[4:4] = [
+        f"Benchmark mean: **{mean}**. Invalid: {invalid_count}; "
+        f"missing: {len(expected) - len(scores) - invalid_count}.",
+        "A confirmed causal check is representative evidence, not proof of complete MELT delivery.",
+        "",
+    ]
+    report.parent.mkdir(parents=True, exist_ok=True)
+    temporary = report.with_name(f".{report.name}.tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temporary.replace(report)
+
+
 def _host_preflight(repository: Path, agent_image: str, min_available_gib: float = 6.0) -> None:
     try:
         result = subprocess.run(
@@ -201,6 +295,32 @@ def _host_preflight(repository: Path, agent_image: str, min_available_gib: float
         docker_memory_bytes=docker_memory,
         min_available_gib=min_available_gib,
     )
+
+
+def _prepared_runtime_preflight() -> None:
+    """Reject an unready cluster; main.py performs authenticated Assistant preflight."""
+    try:
+        response = subprocess.run(
+            ["kubectl", "get", "nodes", "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        nodes = json.loads(response.stdout)["items"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        raise RepeatError("Kubernetes nodes are not ready or selected context is unavailable") from error
+    if not isinstance(nodes, list) or not nodes or any(
+        not isinstance(node, dict)
+        or not any(
+            isinstance(condition, dict)
+            and condition.get("type") == "Ready"
+            and condition.get("status") == "True"
+            for condition in node.get("status", {}).get("conditions", [])
+        )
+        for node in nodes
+    ):
+        raise RepeatError("Kubernetes nodes are not ready")
 
 
 def _batches(repository: Path) -> set[Path]:
@@ -238,8 +358,6 @@ def finalize(
     if not batches:
         raise RepeatError("at least one raw batch is required")
     selected, missing = select_valid_runs(batches, expected)
-    if not selected:
-        raise RepeatError("no completed valid attempts to package")
     from sregym.observability.splunk import SplunkConfig, SplunkHttpBackend
     from sregym.results.splunk_lite_evidence import verify_case_delivery
 
@@ -257,7 +375,9 @@ def finalize(
         checkpoint_attempt(run.parents[2], run)
     report = output / "selection.md"
     write_selection_report(report, selected, missing)
-    build_dossiers(report, output / "by-case", repository)
+    if selected:
+        build_dossiers(report, output / "by-case", repository)
+    write_campaign_summary(output / "summary.md", selected, expected, batches)
     return len(selected), len(missing)
 
 
@@ -285,6 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.min_available_gib < 6.0 and args.problem is None:
                 raise RepeatError("reduced memory floor is permitted only for a single-case smoke")
             _host_preflight(repository, args.agent_image, args.min_available_gib)
+            _prepared_runtime_preflight()
             lock_path = repository / "results/.assistant_v3_lite.lock"
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("w") as lock:
@@ -316,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = None
         count, missing = finalize(repository, output, batches, expected, environment)
-        print(f"Packaged {count} valid case(s); {missing} missing. Open {output / 'by-case/README.md'}")
+        print(f"Packaged {count} valid case(s); {missing} without valid scores. Open {output / 'summary.md'}")
         return 1 if (result is not None and result.returncode) or missing else 0
     except (RepeatError, OSError, ValueError, KeyError) as error:
         print(f"Pilot wrapper: {error}", file=sys.stderr)

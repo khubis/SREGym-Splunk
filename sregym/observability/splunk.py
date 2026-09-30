@@ -100,6 +100,42 @@ class CollectorSnapshot:
     queue_size: dict[SignalName, int | None]
 
 
+def _missing_export_counters(sample: CollectorSnapshot) -> bool:
+    return any(
+        value is None
+        for counters in (sample.sent, sample.send_failed, sample.enqueue_failed)
+        for value in counters.values()
+    )
+
+
+def _settleable_counter_gap(sample: CollectorSnapshot) -> bool:
+    # All sent counters absent is a query failure or exporter blind spot, not
+    # the partial late-indexing case we can safely reconcile.
+    return _missing_export_counters(sample) and any(value is not None for value in sample.sent.values())
+
+
+def _prefer_settled_counters(initial: CollectorSnapshot, settled: CollectorSnapshot) -> CollectorSnapshot:
+    """Use a late historical query without erasing counters it could not return."""
+    def merge(first: dict[SignalName, int | None], later: dict[SignalName, int | None]) -> dict[SignalName, int | None]:
+        return {signal: later[signal] if later[signal] is not None else first[signal] for signal in SIGNAL_NAMES}
+
+    return CollectorSnapshot(
+        sent=merge(initial.sent, settled.sent),
+        send_failed=merge(initial.send_failed, settled.send_failed),
+        enqueue_failed=merge(initial.enqueue_failed, settled.enqueue_failed),
+        queue_size=merge(initial.queue_size, settled.queue_size),
+    )
+
+
+def _counter_evidence(sample: CollectorSnapshot) -> dict[str, dict[SignalName, int | None]]:
+    return {
+        "sent": sample.sent.copy(),
+        "send_failed": sample.send_failed.copy(),
+        "enqueue_failed": sample.enqueue_failed.copy(),
+        "queue_size": sample.queue_size.copy(),
+    }
+
+
 class SplunkBackendError(RuntimeError):
     """Classified, payload-free error returned by the Splunk query backend."""
 
@@ -1071,9 +1107,11 @@ class SplunkObservabilityProvider:
         drain_since = self._now()
         connection_id = self._connection_id or self._resolve_connection()
         closing, _ = self._poll_readiness(context, scope, connection_id, strict=False)
-        closing_snapshot = self._snapshot_with_retry(context, strict=False)
+        closing_sample_at = self._now()
+        closing_snapshot = self._snapshot_with_retry(context, strict=False, checked_at=closing_sample_at)
         self._update_high_water(state.queue_high_water, closing_snapshot.queue_size)
         final_snapshot = closing_snapshot
+        final_sample_at = closing_sample_at
         drained = self._queues_drained(final_snapshot.queue_size)
         drain_minimum: dict[SignalName, int | None] | None = None
         drain_started = self._monotonic()
@@ -1092,7 +1130,10 @@ class SplunkObservabilityProvider:
                     if self._queues_drained(minimum):
                         # Sample failures after the observed drain, not just
                         # before it; keep the terminal counters fail-closed.
-                        final_snapshot = self._snapshot_with_retry(context, strict=False, attempts=1)
+                        final_sample_at = self._now()
+                        final_snapshot = self._snapshot_with_retry(
+                            context, strict=False, attempts=1, checked_at=final_sample_at
+                        )
                         self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
                         drained = True
             elapsed = self._monotonic() - drain_started
@@ -1102,11 +1143,17 @@ class SplunkObservabilityProvider:
                 self._backoff(attempt, None), elapsed, self._policy.drain_timeout_seconds
             ):
                 break
-            final_snapshot = self._snapshot_with_retry(context, strict=False, attempts=1)
+            final_sample_at = self._now()
+            final_snapshot = self._snapshot_with_retry(
+                context, strict=False, attempts=1, checked_at=final_sample_at
+            )
             self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
             drained = drained or self._queues_drained(final_snapshot.queue_size)
 
-        opening_snapshot = state.opening_snapshot
+        opening_initial = state.opening_snapshot
+        closing_initial = closing_snapshot
+        terminal_initial = final_snapshot
+        opening_snapshot = opening_initial
         if any(
             value is None
             for counters in (opening_snapshot.sent, opening_snapshot.send_failed, opening_snapshot.enqueue_failed)
@@ -1133,9 +1180,38 @@ class SplunkObservabilityProvider:
                 queue_size=opening_snapshot.queue_size,
             )
 
-        # Count exports and failures through the terminal drain sample. If the
-        # initial closing sample was unavailable, retain the unknown counters:
-        # a later healthy sample cannot prove what happened across that gap.
+        # The live closing query deliberately excludes the last two minutes of
+        # SignalFlow data. If a counter is missing, wait only for that original
+        # interval to settle and re-query it; never substitute an unrelated
+        # later healthy sample for the missing closing interval.
+        if _settleable_counter_gap(closing_snapshot) or _settleable_counter_gap(final_snapshot):
+            settle_at = final_sample_at + SIGNALFLOW_INGESTION_LAG
+            wait_seconds = max(0.0, min(
+                SIGNALFLOW_INGESTION_LAG.total_seconds(),
+                (settle_at - self._now()).total_seconds(),
+            ))
+            if wait_seconds:
+                self._sleep(wait_seconds)
+            if _settleable_counter_gap(closing_snapshot):
+                settled = self._snapshot_with_retry(
+                    context, strict=False, attempts=1,
+                    checked_at=closing_sample_at + SIGNALFLOW_INGESTION_LAG,
+                )
+                closing_snapshot = _prefer_settled_counters(closing_snapshot, settled)
+                self._update_high_water(state.queue_high_water, closing_snapshot.queue_size)
+            if terminal_initial is closing_initial:
+                final_snapshot = closing_snapshot
+            elif _settleable_counter_gap(final_snapshot):
+                settled = self._snapshot_with_retry(
+                    context, strict=False, attempts=1,
+                    checked_at=final_sample_at + SIGNALFLOW_INGESTION_LAG,
+                )
+                final_snapshot = _prefer_settled_counters(final_snapshot, settled)
+                self._update_high_water(state.queue_high_water, final_snapshot.queue_size)
+
+        # Count exports and failures through the terminal drain sample. An
+        # unresolved closing gap remains invalid even if a terminal sample is
+        # healthy, because it cannot prove what happened during that gap.
         closing_available = all(
             value is not None
             for counters in (closing_snapshot.sent, closing_snapshot.send_failed, closing_snapshot.enqueue_failed)
@@ -1171,6 +1247,14 @@ class SplunkObservabilityProvider:
             drained=drained,
             valid=valid,
             queue_drain_minimum=drain_minimum,
+            counter_samples={
+                "opening_initial": _counter_evidence(opening_initial),
+                "opening": _counter_evidence(opening_snapshot),
+                "closing_initial": _counter_evidence(closing_initial),
+                "closing": _counter_evidence(closing_snapshot),
+                "terminal_initial": _counter_evidence(terminal_initial),
+                "terminal": _counter_evidence(final_snapshot),
+            },
         )
         return state.delivery
 

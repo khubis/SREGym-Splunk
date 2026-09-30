@@ -3,8 +3,8 @@
 This is the short path from a single Lite case to a resumable 21-case run and a
 reviewable evidence package. The wrapper delegates injection, the Assistant call,
 ATIF conversion, the benchmark judge, and attempt checkpointing to `main.py`.
-It then runs the separate bounded Splunk presence queries and copies the selected
-attempts into one folder per case. It does **not** change the prompt or agent
+It then runs the separate bounded Splunk presence queries, copies the selected
+attempts into one folder per case, and writes a campaign `summary.md`. It does **not** change the prompt or agent
 tools. `svelte` plus the reviewed time-window/symptom prompt is a local pilot,
 not an identical leaderboard comparison.
 New attempts require run-scoped Pod-state, application-probe, and container-CPU
@@ -32,15 +32,18 @@ Start the *LangChain Deep Agents Assistant V3* local server separately using the
 **same** org/realm/user/token mapping. Its `make run-local-server-v3` target may
 source the assistant repo's `.env` and override exported variables; inspect
 that behavior or set `ASSISTANT_V3_ENV_FILE=""` and provide the intended
-environment explicitly. The wrapper verifies the runner's target and Assistant
-endpoint, but cannot independently attest which org an already-running server
-was configured for. Use a dedicated eval database as described in
+environment explicitly. The wrapper verifies the runner's target and ready
+Kubernetes nodes; `main.py` then performs an authenticated Assistant session-list
+preflight before injecting a fault. Neither check can attest which org an already-running server
+was configured for. Confirm its startup environment uses the same synthetic org,
+and use a dedicated eval database as described in
 [the full guide](assistant-v3-evaluations.md).
 
 ## One-case smoke, then suite
 
 From the SREGym worktree, with the local Assistant V3 server and Kind/Docker
-ready, first use a prebuilt image that includes this checkout's adapter:
+ready, first use a prebuilt image that includes this checkout's adapter. This is
+one command **from a prepared environment**, not cluster/server provisioning:
 
 ```bash
 uv run --no-sync python -m sregym.results.assistant_v3_lite_repeat run \
@@ -50,7 +53,7 @@ uv run --no-sync python -m sregym.results.assistant_v3_lite_repeat run \
   --output results/reproductions/cronjob-smoke
 ```
 
-After reviewing `results/reproductions/cronjob-smoke/by-case/`, run the suite:
+After reviewing `results/reproductions/cronjob-smoke/summary.md`, run the suite:
 
 ```bash
 uv run --no-sync python -m sregym.results.assistant_v3_lite_repeat run \
@@ -66,7 +69,9 @@ rebuilding it. Rebuild that image with the full-guide command after changing
 containerized code; check its image ID before reusing it. The wrapper refuses
 to start if the image is absent, another wrapper run holds the lock, fewer than
 6 GiB of host memory or 10 GiB of disk are free, or Docker has under 8 GiB
-allocated. These are *start gates*, not a guarantee against later pressure;
+allocated. It also requires Ready nodes in the selected `kubectl` context;
+the benchmark runner subsequently checks Assistant authentication before injection.
+These are *start gates*, not a guarantee against later pressure;
 watch Docker/host memory during the first case. It never prunes resources.
 On a host with less available RAM but otherwise low system memory pressure,
 an operator can lower only the **single-case** start gate with
@@ -103,8 +108,11 @@ uv run --no-sync python -m sregym.results.assistant_v3_lite_repeat run \
 The wrapper rejects a nonexistent resume CSV or duplicate valid attempts; it
 does not silently pick a favorable result. It also refuses a post-run Splunk
 query error. A *missing* signal is kept as missing in the saved proof, not
-converted into success. The output `selection.md` lists completed and missing
-cases; `by-case/<case-id>/` contains the prompt, benchmark oracle, saved
+converted into success. Open `summary.md` first: it reports valid benchmark
+scores separately from classified invalid or missing attempts, with a mean
+whose denominator is only valid attempts. Even an all-invalid batch gets a
+summary. `selection.md` is the raw selection record; `by-case/<case-id>/`
+contains the prompt, benchmark oracle, saved
 pre-agent causal proof, representative post-run metrics/traces/logs/object
 queries, final answer, native and ATIF traces, raw judge result, metrics, and
 SHA-256 provenance manifest. `verification.md` distinguishes confirmed
@@ -112,6 +120,26 @@ telemetry from candidate clues. This is a representative presence and causal
 gate, **not** exhaustive ingestion parity. Splunk-visible numeric grading and
 independent post-grade oracle audit remain separate review work; the wrapper
 does not claim them as complete.
+
+The collector delivery audit also requires run-scoped export counters. If a
+partial counter sample is missing at close, it waits at most the two-minute
+SignalFlow ingest guard and rechecks that same historical interval. A total
+query failure, unresolved counter, counter decrease, send failure, or undrained
+queue remains invalid. The raw delivery artifact records initial and settled
+counter samples so an excluded score can be diagnosed without assuming that
+missing accounting means missing logs.
+
+Each valid summary row links directly to its exact answer, benchmark oracle,
+unchanged judge CSV, pre-agent verification, and native/ATIF traces. Its
+"pre-agent causal check" column is bounded evidence, not proof that every
+emitted telemetry item reached Splunk. Invalid rows link to raw attempt
+metadata; they have no manufactured score or dossier. Retain the raw batch
+until the package is inspected, and use the resume commands above after an
+interruption.
+
+This release supports the 21 Lite cases with the `svelte` deployment profile
+only. The larger case catalog and standard-profile execution require separate
+qualification; neither is implied by this pilot command.
 
 Check the wrapper itself before a campaign:
 

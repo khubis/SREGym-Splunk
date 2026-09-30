@@ -602,7 +602,7 @@ class AssistantArtifactStore:
         if failure is not None:
             payloads[Path("failure.json")] = _json_bytes(failure.as_dict())
         if bundle.delivery is not None:
-            payloads[Path("observability/delivery.json")] = _json_bytes(asdict(bundle.delivery))
+            payloads[Path("observability/delivery.json")] = _json_bytes(_delivery_payload(bundle.delivery))
 
         self._scan_for_secrets(payloads)
         written: list[Path] = []
@@ -728,6 +728,15 @@ def _json_bytes(value: Any) -> bytes:
     except (TypeError, ValueError):
         raise ArtifactError("artifact value is not safe deterministic JSON") from None
     return f"{serialized}\n".encode()
+
+
+def _delivery_payload(delivery: DeliveryReport) -> dict[str, Any]:
+    payload = asdict(delivery)
+    if delivery.queue_drain_minimum is None:
+        payload.pop("queue_drain_minimum")
+    if delivery.counter_samples is None:
+        payload.pop("counter_samples")
+    return payload
 
 
 def _canonical_json(value: Any) -> str:
@@ -1233,7 +1242,7 @@ def finalize_attempt_artifacts(
 
     _atomic_write(metadata_path, _json_bytes(metadata_value))
     if delivery is not None:
-        _atomic_write(root / "observability" / "delivery.json", _json_bytes(asdict(delivery)))
+        _atomic_write(root / "observability" / "delivery.json", _json_bytes(_delivery_payload(delivery)))
     if failure_value is not None:
         _atomic_write(failure_path, _json_bytes(failure_value))
 

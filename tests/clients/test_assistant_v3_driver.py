@@ -1179,6 +1179,18 @@ def test_closing_delivery_audit_updates_artifacts_without_erasing_agent_evidence
     assert json.loads((tmp_path / "observability" / "delivery.json").read_text())["valid"] is False
 
 
+def test_closing_delivery_audit_saves_counter_samples_for_review(tmp_path: Path) -> None:
+    AssistantArtifactStore(tmp_path).write(completed_bundle(delivery=None, cleanup_status="pending"))
+    samples = {"closing_initial": {"sent": {"logs": None}}, "closing": {"sent": {"logs": 42}}}
+    delivery = replace(valid_delivery(), counter_samples=samples)
+
+    finalize_attempt_artifacts(tmp_path, delivery=delivery, cleanup_status="completed")
+
+    saved = json.loads((tmp_path / "observability" / "delivery.json").read_text())
+    assert saved["counter_samples"] == samples
+    assert saved["valid"] is True
+
+
 def test_driver_config_file_round_trip_preserves_readiness_and_attempt_start(tmp_path: Path) -> None:
     payload = {
         "run_id": RUN_ID,

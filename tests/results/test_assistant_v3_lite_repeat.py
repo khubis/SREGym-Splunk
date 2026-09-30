@@ -200,6 +200,95 @@ def test_selection_report_refuses_missing_or_ambiguous_judge(tmp_path: Path) -> 
         repeat.write_selection_report(report, {"case_a": run}, [])
 
 
+def test_campaign_summary_shows_valid_invalid_and_missing_without_invented_scores(tmp_path: Path) -> None:
+    output = tmp_path / "results/reproductions/pilot"
+    valid_batch, invalid_batch = tmp_path / "results/batch1", tmp_path / "results/batch2"
+    valid = _run(valid_batch, "case_a")
+    _run(invalid_batch, "case_b", valid=False)
+    dossier = output / "by-case/case_a"
+    dossier.mkdir(parents=True)
+    (dossier / "manifest.json").write_text(json.dumps({"case_id": "case_a", "benchmark_score": 78.0}))
+    (dossier / "pre_agent_proof.json").write_text(
+        json.dumps({"causal": {"status": "confirmed", "visibility": "fully_splunk_observable"}})
+    )
+    for name in repeat._SUMMARY_LINKS:
+        (dossier / name).touch()
+
+    repeat.write_campaign_summary(
+        output / "summary.md", {"case_a": valid}, ["case_a", "case_b", "case_c"],
+        [valid_batch, invalid_batch],
+    )
+
+    summary = (output / "summary.md").read_text()
+    assert "78/100 across 1 valid attempt" in summary
+    assert "| case_a | valid | 78 | confirmed |" in summary
+    assert "by-case/case_a/final_answer.md" in summary
+    assert "by-case/case_a/benchmark_ground_truth.md" in summary
+    assert "by-case/case_a/judge_raw.csv" in summary
+    assert "by-case/case_a/atif_trace.json" in summary
+    assert "| case_b | infrastructure_invalid | — | — |" in summary
+    assert "| case_c | missing | — | — |" in summary
+    assert "query-secret" not in summary
+
+
+def test_campaign_summary_rejects_incomplete_valid_dossier(tmp_path: Path) -> None:
+    run = _run(tmp_path / "results/batch1", "case_a")
+    with pytest.raises(repeat.RepeatError, match="dossier"):
+        repeat.write_campaign_summary(
+            tmp_path / "results/out/summary.md", {"case_a": run}, ["case_a"], [tmp_path / "results/batch1"]
+        )
+
+
+def test_campaign_summary_rejects_wrong_case_and_bad_score(tmp_path: Path) -> None:
+    batch = tmp_path / "results/batch1"
+    run = _run(batch, "case_a")
+    dossier = tmp_path / "results/out/by-case/case_a"
+    dossier.mkdir(parents=True)
+    for name in (*repeat._SUMMARY_LINKS, "pre_agent_proof.json"):
+        (dossier / name).touch()
+    (dossier / "pre_agent_proof.json").write_text(json.dumps({"causal": {"status": "confirmed"}}))
+    manifest = dossier / "manifest.json"
+    manifest.write_text(json.dumps({"case_id": "other", "benchmark_score": 50}))
+    with pytest.raises(repeat.RepeatError, match="identity mismatch"):
+        repeat.write_campaign_summary(tmp_path / "results/out/summary.md", {"case_a": run}, ["case_a"], [batch])
+    manifest.write_text(json.dumps({"case_id": "case_a", "benchmark_score": 101}))
+    with pytest.raises(repeat.RepeatError, match="invalid benchmark score"):
+        repeat.write_campaign_summary(tmp_path / "results/out/summary.md", {"case_a": run}, ["case_a"], [batch])
+
+
+def test_campaign_summary_classifies_failed_delivery_and_missing_metadata(tmp_path: Path) -> None:
+    batch = tmp_path / "results/batch1"
+    completed = _run(batch, "case_a")
+    (completed / "observability/delivery.json").write_text(json.dumps({"valid": False}))
+    missing_metadata = _run(batch, "case_b", valid=False)
+    (missing_metadata / "run_metadata.json").unlink()
+    report = tmp_path / "results/out/summary.md"
+    repeat.write_campaign_summary(report, {}, ["case_a", "case_b"], [batch])
+    summary = report.read_text()
+    assert "| case_a | delivery_invalid | — | — |" in summary
+    assert "| case_b | incomplete | — | — | — |" in summary
+
+
+def test_campaign_summary_preserves_corrupt_invalid_attempt_as_incomplete(tmp_path: Path) -> None:
+    batch = tmp_path / "results/batch1"
+    run = _run(batch, "case_a", valid=False)
+    (run / "run_metadata.json").write_text("{truncated")
+    report = tmp_path / "results/out/summary.md"
+    repeat.write_campaign_summary(report, {}, ["case_a"], [batch])
+    assert "| case_a | incomplete | — | — |" in report.read_text()
+
+
+def test_finalize_without_valid_attempt_still_reports_failure(tmp_path: Path) -> None:
+    batch = tmp_path / "results/batch1"
+    _run(batch, "case_a", valid=False)
+    output = tmp_path / "results/reproductions/pilot"
+    assert repeat.finalize(tmp_path, output, [batch], ["case_a", "case_b"], _environment()) == (0, 2)
+    report = (output / "summary.md").read_text()
+    assert "0 valid attempts" in report
+    assert "infrastructure_invalid" in report
+    assert "missing" in report
+
+
 def test_postrun_proof_rejects_wrong_connection_or_attempt(tmp_path: Path) -> None:
     run = _run(tmp_path / "results/batch", "case_a")
     with pytest.raises(repeat.RepeatError, match="attempt Logs connection"):
@@ -243,13 +332,14 @@ def test_finalize_reuses_saved_signal_proof_and_checkpoints_before_dossier(
     calls: list[str] = []
     monkeypatch.setattr(repeat, "checkpoint_attempt", lambda *_: calls.append("checkpoint"))
     monkeypatch.setattr(repeat, "build_dossiers", lambda *_: calls.append("dossier"))
+    monkeypatch.setattr(repeat, "write_campaign_summary", lambda *_: calls.append("summary"))
 
     count, missing = repeat.finalize(
         tmp_path, tmp_path / "results/reproductions/pilot", [batch], ["case_a", "case_b"], _environment()
     )
 
     assert (count, missing) == (1, 1)
-    assert calls == ["checkpoint", "dossier"]
+    assert calls == ["checkpoint", "dossier", "summary"]
 
 
 def test_finalize_retries_saved_query_error_before_publishing(
@@ -305,18 +395,21 @@ def test_finalize_retries_saved_query_error_before_publishing(
     monkeypatch.setattr(splunk_lite_evidence, "verify_case_delivery", retry)
     monkeypatch.setattr(repeat, "checkpoint_attempt", lambda *_: calls.append("checkpoint"))
     monkeypatch.setattr(repeat, "build_dossiers", lambda *_: calls.append("dossier"))
+    monkeypatch.setattr(repeat, "write_campaign_summary", lambda *_: calls.append("summary"))
     assert repeat.finalize(tmp_path, tmp_path / "results/reproductions/pilot", [batch], ["case_a"], _environment()) == (
         1,
         0,
     )
-    assert calls == ["retried", "checkpoint", "dossier"]
+    assert calls == ["retried", "checkpoint", "dossier", "summary"]
 
 
 def test_finalize_needs_at_least_one_valid_case(tmp_path: Path) -> None:
     with pytest.raises(repeat.RepeatError, match="raw batch"):
         repeat.finalize(tmp_path, tmp_path / "results/out", [], ["case_a"], _environment())
-    with pytest.raises(repeat.RepeatError, match="no completed valid"):
-        repeat.finalize(tmp_path, tmp_path / "results/out", [tmp_path / "batch"], ["case_a"], _environment())
+    assert repeat.finalize(tmp_path, tmp_path / "results/out", [tmp_path / "batch"], ["case_a"], _environment()) == (
+        0,
+        1,
+    )
     assert repeat._batches(tmp_path / "absent") == set()
 
 
@@ -370,6 +463,7 @@ def test_run_cli_launches_only_one_case_and_passes_mapped_credentials(
     (tmp_path / "results").mkdir()
     monkeypatch.setattr(repeat.os, "environ", _environment())
     monkeypatch.setattr(repeat, "_host_preflight", lambda *_: None)
+    monkeypatch.setattr(repeat, "_prepared_runtime_preflight", lambda *_: None)
     launched: list[list[str]] = []
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -482,6 +576,71 @@ def test_host_preflight_uses_docker_limit_and_rejects_missing_image(
         repeat._host_preflight(tmp_path, "missing:tag")
 
 
+def test_prepared_runtime_preflight_requires_ready_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def kubectl(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout=json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "True"}]}}]}),
+        )
+
+    monkeypatch.setattr(repeat.subprocess, "run", kubectl)
+    repeat._prepared_runtime_preflight()
+    assert calls == [["kubectl", "get", "nodes", "-o", "json"]]
+
+
+def test_prepared_runtime_preflight_rejects_unready_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repeat.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "False"}]}}]}),
+        ),
+    )
+    with pytest.raises(repeat.RepeatError, match="Kubernetes nodes are not ready"):
+        repeat._prepared_runtime_preflight()
+    monkeypatch.setattr(
+        repeat.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"items": [{"status": {"conditions": [None]}}]})
+        ),
+    )
+    with pytest.raises(repeat.RepeatError, match="Kubernetes nodes are not ready"):
+        repeat._prepared_runtime_preflight()
+
+
+def test_prepared_runtime_preflight_rejects_kubectl_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        repeat.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("private context"))
+    )
+    with pytest.raises(repeat.RepeatError, match="selected context is unavailable") as error:
+        repeat._prepared_runtime_preflight()
+    assert "private context" not in str(error.value)
+
+
+def test_run_does_not_launch_when_cluster_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "results").mkdir()
+    monkeypatch.setattr(repeat.os, "environ", _environment())
+    monkeypatch.setattr(repeat, "_host_preflight", lambda *_: None)
+    monkeypatch.setattr(
+        repeat, "_prepared_runtime_preflight", lambda *_: (_ for _ in ()).throw(repeat.RepeatError("not ready"))
+    )
+    monkeypatch.setattr(repeat.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("launched runner"))
+    assert repeat.main([
+        "run", "--credentials", "synthetic", "--repository", str(tmp_path),
+        "--output", str(tmp_path / "results/reproductions/pilot"),
+    ]) == 2
+
+
 def test_finalize_cli_does_not_start_docker_and_rejects_external_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -520,6 +679,7 @@ def test_run_cli_failure_paths_preserve_result_and_do_not_claim_success(
     results.mkdir()
     monkeypatch.setattr(repeat.os, "environ", _environment())
     monkeypatch.setattr(repeat, "_host_preflight", lambda *_: None)
+    monkeypatch.setattr(repeat, "_prepared_runtime_preflight", lambda *_: None)
     monkeypatch.setattr(repeat, "finalize", lambda *_: (1, 0))
     if mode == "minute_collision":
         (results / datetime.now().strftime("%m%d_%H%M")).mkdir()

@@ -1490,6 +1490,114 @@ def test_finish_attempt_requeries_late_indexed_opening_counters_at_original_time
     ) + splunk_module.SIGNALFLOW_INGESTION_LAG
 
 
+def test_finish_attempt_records_counter_samples_when_export_accounting_is_unknown():
+    backend = FakeBackend()
+    opening = snapshot(sent=10)
+    closing = snapshot(sent=15)
+    closing.sent["logs"] = None
+    closing.sent["kubernetes_events"] = None
+    terminal = snapshot(sent=20)
+    terminal.sent["logs"] = None
+    terminal.sent["kubernetes_events"] = None
+    backend.snapshot_outcomes = [opening, closing, terminal]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+    saved = serialize_provider_artifact(delivery)
+
+    assert saved["counter_samples"]["opening"]["sent"]["logs"] == 10
+    assert saved["counter_samples"]["closing"]["sent"]["logs"] is None
+    assert saved["counter_samples"]["terminal"]["sent"]["logs"] is None
+    assert delivery.valid is False
+
+
+def test_finish_attempt_accepts_late_indexed_closing_export_counter():
+    backend = FakeBackend()
+    opening = snapshot(sent=10)
+    closing = snapshot(sent=15)
+    closing.sent["logs"] = None
+    closing.sent["kubernetes_events"] = None
+    settled = snapshot(sent=20)
+    backend.snapshot_outcomes = [opening, closing, settled]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is True
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 10)
+    assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, 0)
+    sleep.assert_called_once_with(splunk_module.SIGNALFLOW_INGESTION_LAG.total_seconds())
+
+
+@pytest.mark.parametrize("settled_failures,expected_valid", ((0, True), (1, False)))
+def test_finish_attempt_rechecks_terminal_counters_after_queue_drain(settled_failures, expected_valid):
+    backend = FakeBackend()
+    opening = snapshot(sent=10, queue=1)
+    closing = snapshot(sent=15, queue=1)
+    terminal = snapshot(sent=20)
+    terminal.sent["logs"] = None
+    terminal.sent["kubernetes_events"] = None
+    settled = snapshot(sent=25, failed=settled_failures)
+    backend.snapshot_outcomes = [opening, closing, terminal, settled]
+    backend.drain_outcomes = [dict.fromkeys(SIGNALS, 0)]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is expected_valid
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 15)
+    assert delivery.send_failed_delta == dict.fromkeys(SIGNALS, settled_failures)
+    assert delivery.counter_samples["terminal_initial"]["sent"]["logs"] is None
+    assert delivery.counter_samples["terminal"]["sent"]["logs"] == 25
+
+
+def test_finish_attempt_rechecks_missing_close_without_replacing_healthy_terminal():
+    backend = FakeBackend()
+    opening = snapshot(sent=10, queue=1)
+    closing = snapshot(sent=15, queue=1)
+    closing.sent["logs"] = None
+    closing.sent["kubernetes_events"] = None
+    backend.snapshot_outcomes = [opening, closing, snapshot(sent=20), snapshot(sent=15, queue=1)]
+    backend.drain_outcomes = [dict.fromkeys(SIGNALS, 0)]
+    provider = prepared_provider(backend)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is True
+    assert delivery.sent_delta == dict.fromkeys(SIGNALS, 10)
+    assert delivery.counter_samples["closing_initial"]["sent"]["logs"] is None
+    assert delivery.counter_samples["closing"]["sent"]["logs"] == 15
+    assert delivery.counter_samples["terminal"]["sent"]["logs"] == 20
+
+
+def test_finish_attempt_skips_settlement_sleep_if_closing_window_is_already_old():
+    backend = FakeBackend()
+    opening = snapshot(sent=10)
+    closing = snapshot(sent=15)
+    closing.sent["logs"] = None
+    closing.sent["kubernetes_events"] = None
+    backend.snapshot_outcomes = [opening, closing, snapshot(sent=20)]
+    sleep = Mock()
+    provider = prepared_provider(backend, sleep=sleep)
+    scope = ApplicationScope("social-network", ("social-network",))
+    provider.wait_until_queryable(attempt_context(), scope)
+    provider._now = lambda: NOW + (timedelta(minutes=5) if len(backend.snapshot_calls) >= 2 else timedelta(seconds=5))
+
+    delivery = provider.finish_attempt(attempt_context(), scope)
+
+    assert delivery.valid is True
+    sleep.assert_not_called()
+
+
 @pytest.mark.parametrize("invalid_case", ("missing_counter", "send_failure", "enqueue_failure", "undrained"))
 def test_finish_attempt_invalidates_missing_failures_and_undrained_queues(invalid_case):
     backend = FakeBackend()
@@ -1504,6 +1612,9 @@ def test_finish_attempt_invalidates_missing_failures_and_undrained_queues(invali
     else:
         closing = snapshot(sent=None)
     backend.snapshot_outcomes = [opening, closing, closing]
+    if invalid_case == "missing_counter":
+        # Both the delayed opening and closing rechecks remain unavailable.
+        backend.snapshot_outcomes.extend((closing, closing))
     provider = prepared_provider(backend, policy=reliability_policy(max_attempts=1))
     scope = ApplicationScope("social-network", ("social-network",))
     provider.wait_until_queryable(attempt_context(), scope)

@@ -94,6 +94,7 @@ class DeliveryReport:
     drained: bool
     valid: bool
     queue_drain_minimum: dict[SignalName, int | None] | None = None
+    counter_samples: dict[str, dict[str, dict[SignalName, int | None]]] | None = None
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
@@ -210,7 +211,10 @@ def serialize_provider_artifact(value: ProviderArtifact) -> dict[str, Any]:
         return payload
     if not isinstance(value, _SERIALIZABLE_TYPES):
         raise TypeError("unsupported provider artifact type")
-    return _json_safe(asdict(value))
+    payload = _json_safe(asdict(value))
+    if isinstance(value, DeliveryReport) and value.counter_samples is None:
+        payload.pop("counter_samples")
+    return payload
 
 
 def _json_safe(value: Any) -> Any:
