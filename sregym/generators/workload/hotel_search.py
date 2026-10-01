@@ -27,6 +27,7 @@ class KubectlPortForward:
         self.local_port: int | None = None
         self.process: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        self._stopping = threading.Event()
 
     @staticmethod
     def _free_port() -> int:
@@ -41,9 +42,16 @@ class KubectlPortForward:
             sock.settimeout(0.5)
             return sock.connect_ex(("127.0.0.1", self.local_port)) == 0
 
+    def _ensure_open(self) -> None:
+        if self._stopping.is_set():
+            raise RuntimeError(f"port-forward to service/{self.service} is stopping")
+
     def start(self, timeout: float = 30) -> int:
+        self._ensure_open()
         with self._lock:
+            self._ensure_open()
             if self._healthy():
+                self._ensure_open()
                 return int(self.local_port)
             self._stop_locked()
             self.local_port = self._free_port()
@@ -64,12 +72,16 @@ class KubectlPortForward:
             )
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if self._stopping.is_set():
+                    self._stop_locked()
+                    raise RuntimeError(f"port-forward to service/{self.service} is stopping")
                 if self.process.poll() is not None:
                     detail = self.process.stderr.read().strip() if self.process.stderr else ""
                     raise RuntimeError(f"port-forward to service/{self.service} failed: {detail}")
                 if self._healthy():
+                    self._ensure_open()
                     return self.local_port
-                time.sleep(0.2)
+                self._stopping.wait(0.2)
             self._stop_locked()
             raise TimeoutError(f"timed out forwarding service/{self.service}:{self.remote_port}")
 
@@ -86,8 +98,21 @@ class KubectlPortForward:
         self.process = None
 
     def stop(self) -> None:
+        # Prevent waiting request workers from reopening the tunnel ahead of teardown.
+        self._stopping.set()
         with self._lock:
             self._stop_locked()
+
+    def reset(self) -> None:
+        """Replace a failed tunnel without reopening one being shut down."""
+        with self._lock:
+            self._ensure_open()
+            self._stop_locked()
+
+    def reopen(self) -> None:
+        """Allow an explicitly restarted workload to create a fresh tunnel."""
+        with self._lock:
+            self._stopping.clear()
 
 
 class HotelSearchMetrics:
@@ -122,7 +147,7 @@ class HotelSearchMetrics:
             response = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=5)
             response.raise_for_status()
         except requests.RequestException:
-            forward.stop()
+            forward.reset()
             port = forward.start()
             response = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=5)
             response.raise_for_status()
@@ -134,6 +159,10 @@ class HotelSearchMetrics:
     def close(self) -> None:
         for forward in self.forwards.values():
             forward.stop()
+
+    def reopen(self) -> None:
+        for forward in self.forwards.values():
+            forward.reopen()
 
 
 @dataclass(frozen=True)
@@ -175,6 +204,8 @@ class HotelSearchWorkload:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        self.frontend.reopen()
+        self.metrics.reopen()
         self.frontend.start()
         self._stop.clear()
         self.current_rate = self.base_rate
@@ -215,6 +246,8 @@ class HotelSearchWorkload:
                 next_submission = now + interval
 
     def _request(self) -> None:
+        if self._stop.is_set():
+            return
         started = time.monotonic()
         success = False
         try:
@@ -226,7 +259,7 @@ class HotelSearchWorkload:
             if response.status_code == 200:
                 payload = json.loads(response.text)
                 success = self._valid_response(payload)
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, ValueError, RuntimeError):
             pass
         elapsed = time.monotonic() - started
         with self._lock:

@@ -32,13 +32,15 @@ Turn the existing Assistant V3/Splunk Lite pilot into a repeatable team workflow
 
 ## Acceptance criteria
 
-- [ ] Given a prepared environment and one Lite case ID, one invocation produces exactly one selected case folder and a summary with its valid score or explicit failure state.
-- [ ] Given no case ID, the same invocation attempts the 21 Lite cases sequentially and reports valid, invalid, and missing counts without treating an invalid attempt as a diagnosis failure.
-- [ ] Given missing essential Splunk evidence or an unavailable Assistant endpoint, the attempt is classified and retained, but no valid score is reported.
-- [ ] Given a crash after a completed case, resumption retains that case's exact answer, judge result, evidence, and trace and does not rerun or silently replace it.
-- [ ] Given a completed case, a reviewer can navigate from its summary row to the prompt, answer, oracle, raw judge critique, bounded pre-agent checks, delivery audit, and both traces without relying on this chat.
+- [x] Given a prepared environment and one Lite case ID, one invocation produces exactly one selected case folder and a summary with its valid score or explicit failure state.
+- [x] Given no case ID, the same invocation attempts the 21 Lite cases sequentially and reports valid, invalid, and missing counts without treating an invalid attempt as a diagnosis failure.
+- [x] Given missing essential Splunk evidence or an unavailable Assistant endpoint, the attempt is classified and retained, but no valid score is reported.
+- [x] Given a crash after a completed case, resumption retains that case's exact answer, judge result, evidence, and trace and does not rerun or silently replace it.
+- [x] Given a completed case, a reviewer can navigate from its summary row to the prompt, answer, oracle, raw judge critique, bounded pre-agent checks, delivery audit, and both traces without relying on this chat.
 - [ ] Given two independent developers using the same prepared environment, both can follow the documented command and identify all required prerequisites and recovery steps.
-- [ ] Given the release test run, all targeted automated tests pass, one live smoke is reviewed, and a full Lite result package is produced on a host with adequate headroom.
+- [x] Given the release test run, all targeted automated tests pass, one live smoke is reviewed, and a full Lite result package is produced on a host with adequate headroom.
+
+The separate second-developer walkthrough is still outstanding. Timeout forwarding and incomplete-attempt handling are tested, but a live 1,200-second timeout was not deliberately consumed.
 
 ## Assumptions
 
@@ -49,3 +51,25 @@ Turn the existing Assistant V3/Splunk Lite pilot into a repeatable team workflow
 ## Open questions
 
 None for this release.
+
+## Campaign-hardening addendum (2026-09-30)
+
+This addendum does not change the 21 cases, prompts, oracle, judge, agent tools, or `svelte` profile.
+
+11. Re-running the same command and output directory MUST recover previously saved valid cases without rerunning them, and MUST preserve invalid and interrupted attempt artifacts. The runner MUST fail closed on ambiguous duplicate results or a changed campaign target. Recovery MUST not require the operator to assemble raw batch paths by hand.
+12. The wrapper MUST pass a 1,200-second Assistant V3 execution timeout for each case. A timeout or transient failure MUST be recorded as incomplete, never as a zero diagnosis score. No automatic re-simulation retry is required for v1; a subsequent invocation retries only unfinished cases.
+13. Before each case, the workflow MUST recheck host/Docker/cluster headroom and the configured Splunk target. It MUST reject stale or mismatched campaign artifacts before they enter a report. Authenticated Assistant connectivity is required before fault injection; org identity of an independently started Assistant server remains an explicit operator check unless the server exposes a trustworthy identity endpoint.
+14. The full 21-case campaign MUST be attempted sequentially on this host without bypassing the safety floor. Recovery MUST be exercised by a deliberately induced interruption after a saved case and a repeat invocation. The final report MUST distinguish completed, invalid, and not-attempted cases and retain raw provenance.
+15. A case-owned traffic generator MUST stop promptly after Assistant submission, even when requests and port-forward starts are in flight. Its shutdown MUST prevent queued requests from reopening the tunnel, so the five-minute conductor cleanup deadline can complete and the Splunk delivery audit can be saved. This is scoped to the Hotel Reservation search-retry workload exposed by the live 21-case run.
+
+### Addendum acceptance criteria
+
+- [x] A second invocation with the same output and unchanged target skips completed cases and continues the remaining order; changed org/realm/Logs connection or image fails before launching.
+- [ ] A case that exceeds 1,200 seconds of Assistant execution remains incomplete with its trace/attempt artifacts preserved; the campaign can continue on a later invocation.
+- [x] A simulated interruption after one checkpoint, followed by rerun, produces one selected valid result per case without manual resume CSV selection or silent score replacement.
+- [x] The local 21-case run records actual outcomes, resource stops, and recovery observations; no claim of complete qualification is made if the host gate or an unsafe cleanup prevents completion.
+- [x] A shutdown regression test first reproduces the search-retry workload lock contention, then passes with bounded port-forward stop; the unfinished final case is retried from the same campaign output and receives a valid delivery audit or an explicitly reported remaining blocker.
+
+### Addendum non-goals
+
+- Automatic cluster or Assistant provisioning, server-org attestation that the API cannot provide, blind retry after ambiguous Assistant submission, model-token accounting as a hard budget, and N-agent-trials-per-simulation.
