@@ -120,35 +120,25 @@ dependencies using its `README.md`. Copy the companion
 that checkout as `.env.sregym`. Set its `SF_TOKEN`, `SFX_REALM`, `ORG_ID`, and
 `USER_ID` to the **same values** as the synthetic variables above.
 
-The companion template requires the Assistant V3 gateway embedding opt-in change
-in [Assistant MR !3836](https://cd.splunkdev.com/observability/ai/assistant/-/merge_requests/3836)
-(internal Splunk access required). Until it is merged, use its published branch:
+Use current Assistant `main` (internal Splunk access required). The gateway
+embedding fix, `d8afa912c` (AICCA-2526), is already merged there:
 
 ```bash
-git fetch origin codex/assistant-v3-gateway-embeddings
-git switch codex/assistant-v3-gateway-embeddings
+git fetch origin main
+git switch main
+git pull --ff-only origin main
 ```
 
 Run these in the separate Assistant checkout; preserve any local edits before
-switching branches. The live qualification used this branch. Do not assume an
-older Assistant checkout recognizes the embedding configuration. After merge,
-a main checkout containing the MR is sufficient.
+switching branches. Do not use an older checkout predating that fix. No separate
+memory gateway opt-in or custom embedding-routing branch is needed.
 
 If you need the separate repository, clone
 `https://cd.splunkdev.com/observability/ai/assistant.git` using your authorized
-GitLab credentials. If SSH fetch reports `Permission denied (publickey)` but
-GitLab CLI authentication works, the HTTPS credential helper is an alternative:
+GitLab credentials. Authenticate with `dev-login gitlab` if needed. Preserve
+local edits before switching branches.
 
-```bash
-# In the Assistant checkout. Authenticate with dev-login gitlab if needed.
-git -c credential.helper='!glab auth git-credential' fetch \
-  https://cd.splunkdev.com/observability/ai/assistant.git \
-  codex/assistant-v3-gateway-embeddings
-# Create this local branch once; if it already exists, use git switch <branch>.
-git switch -c codex/assistant-v3-gateway-embeddings FETCH_HEAD
-```
-
-After selecting the required branch, sync that checkout's locked dependencies:
+After selecting a current main checkout, sync that checkout's locked dependencies:
 
 ```bash
 dev-login artifactory >/dev/null
@@ -158,12 +148,13 @@ uv sync --locked
 Keep the two repositories' virtual environments separate; their Python
 requirements differ. The Assistant commands use its own `uv` environment.
 
-There are two independently configured model connections:
+Chat and memory now share the V3 gateway selector and URL; their model choices
+remain separate:
 
 | Connection | Configuration / requirement |
 |---|---|
 | V3 chat | The template enables the lab0 LLM Gateway and GPT-5.6 Luna/medium. |
-| Semantic-memory embeddings | `ASSISTANT_V3_MEMORY_USE_LLM_GATEWAY_SERVICE=true` opts in to the gateway. `LLM_GATEWAY_SERVICE_URL` is the root URL; the template selects `text-embedding-3-large` (3072 dimensions). |
+| Semantic-memory embeddings | Uses the same V3 gateway selector and URL as chat. No embedding-specific environment variables are required: main defaults to `text-embedding-3-small` (1536 dimensions), verified through the gateway. |
 
 For the DNS gateway route above, no lab0 Kubernetes proxy, separate lab0 SF
 token, or direct Azure API key is needed. Confirm gateway access through the
@@ -171,10 +162,14 @@ onboarding guide and run the embedding preflight below. The SDK's placeholder
 key is not authentication; gateway access controls must authenticate/authorize
 callers. Org/service headers are attribution, not a security boundary.
 
-Use a **fresh dedicated memory database** for large-model vectors. Do not reuse
-a database containing small-model vectors. `AIMEMORY_DB_NAME` and
+Use a **fresh dedicated memory database** for the default small-model vectors.
+If migrating from our earlier template, remove its embedding-model and routing
+overrides from your private env file and use the new small-memory database name.
+Do not reuse an index containing large-model (3072-dimensional) vectors with
+the default small model (1536 dimensions); it needs rebuilding or a fresh database.
+`AIMEMORY_DB_NAME` and
 `MEMORY_PG_DATABASE` must match; the V3 Make target exports the former as the
-latter. This opt-in does not change the separate legacy documentation-search
+latter. The V3 memory routing change does not change the separate legacy documentation-search
 embedding path. The template also gives DeepEval an explicit read-only cache
 location, avoiding a startup error caused by an empty generated cache path.
 
@@ -456,8 +451,10 @@ The local, gitignored package is
 is linked under its `by-case/` folder, with raw provenance in `results/1005_1734`.
 This constrained-host smoke used `--min-available-gib 4`; the documented command
 defaults to 6 GiB. It does not qualify every laptop, the complete suite, or the
-gateway's production authentication/authorization controls. The required
-Assistant change is published in MR !3836; use its branch until merged.
+gateway's production authentication/authorization controls. These historical
+smokes used the earlier custom embedding branch; they are not live validation
+of the subsequent Assistant main implementation. Current setup uses main's
+merged gateway routing fix instead.
 
 ### Sequential suite-path smoke (2026-10-05)
 
@@ -470,6 +467,40 @@ and ATIF traces were saved, and each final answer matched its judge submission.
 The local package is `results/reproductions/lite-suite-smoke-20261005/summary.md`.
 The remaining 19 cases were intentionally not run: this qualifies the sampled
 sequential workflow, not the full suite or a performance comparison.
+
+### Assistant main embedding preflight (2026-10-06)
+
+After updating Assistant main to `dcfe07343`, a gateway preflight first confirmed
+the explicit large model. A subsequent preflight removed all embedding-specific
+variables and successfully fetched a 1536-dimensional `text-embedding-3-small`
+vector using the synthetic identity. The template now uses this verified default
+and a separate small-memory database name. Main uses the shared V3 gateway
+configuration; no embedding-specific flag, model, or dimension override is needed.
+
+### Fresh-template main workflow retest (2026-10-06)
+
+Copied the revised Assistant template into a new private env file, filled only
+the synthetic identity and fresh session/tool/small-memory database names, and
+started Assistant main `dcfe07343` with the documented V3 Make target. No
+embedding-specific environment variables or custom routing branch were used.
+The JWT and default-small embedding preflights passed after refreshing the
+expired synthetic SF query token.
+
+The documented one-case command completed the CronJob case with a valid result
+and **44/100** benchmark score. Representative pre-agent causal and delivery
+checks passed; the closing audit was valid and drained, with zero final queues
+and zero send/enqueue failure deltas in all four pipelines. The terminal answer
+matched its single judge submission and final ATIF message. Native and ATIF-v1.7
+traces were retained (79 ATIF steps), with 35 root/subagent tool calls, 8 failed
+tool results, 379.2 seconds agent duration, and 1,213,678 reported tokens.
+
+The local gitignored evidence package is
+`results/reproductions/assistant-main-default-embeddings-20261006/summary.md`;
+raw provenance is in `results/1006_1602`. This qualifies one end-to-end case on
+the existing provisioned host, not a fresh-machine installation, all 21 cases,
+or diagnosis accuracy. Normal teardown completed and the wrapper exited zero.
+Repeating the same command and output folder reused the valid result without
+starting another simulation. The owned test server was stopped afterward.
 
 Check the wrapper itself before a campaign:
 

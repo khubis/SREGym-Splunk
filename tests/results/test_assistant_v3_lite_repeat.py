@@ -55,8 +55,10 @@ def test_assistant_env_example_separates_gateway_embeddings_and_eval_memory() ->
         assert names[key] == '""'
     assert names["USE_LLM_GATEWAY_SERVICE"] == "true"
     assert names["ASSISTANT_V3_USE_LLM_GATEWAY_SERVICE"] == "true"
-    assert names["ASSISTANT_V3_MEMORY_USE_LLM_GATEWAY_SERVICE"] == "true"
-    assert names["ASSISTANT_V3_MEMORY_EMBEDDING_MODEL"] == "text-embedding-3-large"
+    assert "ASSISTANT_V3_MEMORY_USE_LLM_GATEWAY_SERVICE" not in names
+    assert "ASSISTANT_V3_MEMORY_EMBEDDING_MODEL" not in names
+    assert "ASSISTANT_V3_MEMORY_EMBEDDING_DIM" not in names
+    assert names["AIMEMORY_DB_NAME"] == "sregym_gateway_small_memory"
     assert names["LLM_GATEWAY_SERVICE_URL"] == names["ASSISTANT_V3_LLM_GATEWAY_SERVICE_URL"]
     assert names["USE_OPENAI_PROXY"] == "false"
     assert names["DEEPEVAL_FILE_SYSTEM"] == "READ_ONLY"
@@ -68,6 +70,18 @@ def test_assistant_env_example_separates_gateway_embeddings_and_eval_memory() ->
     databases = {names[key] for key in ("POSTGRES_DATABASE", "AIMEMORY_DB_NAME", "TOOL_DB_NAME")}
     assert len(databases) == 3
     assert all(database.startswith("sregym_") for database in databases)
+
+
+def test_assistant_setup_uses_main_not_obsolete_embedding_branch() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    for relative in ("README.md", "docs/assistant-v3-lite-repeat.md", ".env.assistant-v3-splunk.example"):
+        text = (repository / relative).read_text(encoding="utf-8")
+        assert "3836" not in text
+        assert "codex/assistant-v3-gateway-embeddings" not in text
+        assert "ASSISTANT_V3_MEMORY_USE_LLM_GATEWAY_SERVICE" not in text
+    runbook = (repository / "docs/assistant-v3-lite-repeat.md").read_text(encoding="utf-8")
+    assert "git switch main" in runbook
+    assert "git pull --ff-only origin main" in runbook
 
 
 def _environment() -> dict[str, str]:

@@ -46,9 +46,9 @@ uses a different, native-observability workflow.
    [runner environment template](./.env.splunk-lite.example) at `.env.splunk-lite`
    and [Assistant server template](./.env.assistant-v3-splunk.example) in the
    separate Assistant checkout. The setup includes an embedding preflight:
-   V3 semantic memory must explicitly opt in to the gateway embedding route,
-   using [Assistant MR !3836](https://cd.splunkdev.com/observability/ai/assistant/-/merge_requests/3836)
-   (internal access required; use its branch until merged) and a fresh memory database.
+   use current Assistant `main`, where semantic memory follows V3's gateway
+   configuration, and a dedicated memory database compatible with the selected
+   embedding model. No separate embedding-routing patch is required.
 2. From this SREGym checkout, run one case with one command:
 
    ```bash
