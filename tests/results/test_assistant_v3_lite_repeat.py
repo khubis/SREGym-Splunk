@@ -42,9 +42,7 @@ def test_splunk_lite_env_example_matches_wrapper_requirements_without_secrets() 
     assert "--env-file .env.splunk-lite" in (repository / "docs/assistant-v3-lite-repeat.md").read_text(
         encoding="utf-8"
     )
-    ignored = subprocess.run(
-        ["git", "check-ignore", "-q", ".env.splunk-lite"], cwd=repository, check=False
-    )
+    ignored = subprocess.run(["git", "check-ignore", "-q", ".env.splunk-lite"], cwd=repository, check=False)
     assert ignored.returncode == 0
 
 
@@ -217,11 +215,17 @@ def test_resource_wait_retries_only_transient_memory_pressure(monkeypatch: pytes
     repeat.wait_for_host_preflight(tmp_path, "image:tag", 4.0, retries=3, interval_seconds=30)
     assert attempts == 3
     assert sleeps == [30, 30]
-    monkeypatch.setattr(repeat, "_host_preflight", lambda *_: (_ for _ in ()).throw(repeat.RepeatError("less than 10 GiB free disk")))
+    monkeypatch.setattr(
+        repeat, "_host_preflight", lambda *_: (_ for _ in ()).throw(repeat.RepeatError("less than 10 GiB free disk"))
+    )
     with pytest.raises(repeat.RepeatError, match="disk"):
         repeat.wait_for_host_preflight(tmp_path, "image:tag", 4.0, retries=3, interval_seconds=30)
     assert sleeps == [30, 30]
-    monkeypatch.setattr(repeat, "_host_preflight", lambda *_: (_ for _ in ()).throw(repeat.RepeatError("less than 4 GiB available host memory")))
+    monkeypatch.setattr(
+        repeat,
+        "_host_preflight",
+        lambda *_: (_ for _ in ()).throw(repeat.RepeatError("less than 4 GiB available host memory")),
+    )
     with pytest.raises(repeat.RepeatError, match="memory"):
         repeat.wait_for_host_preflight(tmp_path, "image:tag", 4.0, retries=2, interval_seconds=30)
     assert sleeps == [30, 30, 30]
@@ -234,18 +238,24 @@ def test_resource_wait_retries_only_transient_memory_pressure(monkeypatch: pytes
 def test_memory_override_changes_warning_threshold(capsys: pytest.CaptureFixture[str]) -> None:
     gib = 1024**3
     repeat.check_headroom(
-        available_bytes=4.2 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
+        available_bytes=4.2 * gib,
+        free_disk_bytes=20 * gib,
+        docker_memory_bytes=10 * gib,
         min_available_gib=4.0,
     )
     assert capsys.readouterr().err == ""
     repeat.check_headroom(
-        available_bytes=3.9 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
+        available_bytes=3.9 * gib,
+        free_disk_bytes=20 * gib,
+        docker_memory_bytes=10 * gib,
         min_available_gib=4.0,
     )
     assert "Warning" in capsys.readouterr().err
     with pytest.raises(repeat.RepeatError, match="memory floor"):
         repeat.check_headroom(
-            available_bytes=7 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
+            available_bytes=7 * gib,
+            free_disk_bytes=20 * gib,
+            docker_memory_bytes=10 * gib,
             min_available_gib=3.0,
         )
 
@@ -437,7 +447,9 @@ def test_campaign_summary_shows_valid_invalid_and_missing_without_invented_score
         (dossier / name).touch()
 
     repeat.write_campaign_summary(
-        output / "summary.md", {"case_a": valid}, ["case_a", "case_b", "case_c"],
+        output / "summary.md",
+        {"case_a": valid},
+        ["case_a", "case_b", "case_c"],
         [valid_batch, invalid_batch],
     )
 
@@ -796,28 +808,47 @@ def test_selected_attempt_identity_rejects_wrong_model_or_connection(tmp_path: P
     run = _run(tmp_path / "batch", "case_a")
     metadata_path = run / "run_metadata.json"
     metadata = json.loads(metadata_path.read_text())
-    metadata.update(benchmark_profile="svelte", requested_model="gpt-5.6-luna", requested_reasoning="medium",
-                    judge_model="azure/gpt-5.6-luna")
+    metadata.update(
+        benchmark_profile="svelte",
+        requested_model="gpt-5.6-luna",
+        requested_reasoning="medium",
+        judge_model="azure/gpt-5.6-luna",
+    )
     metadata_path.write_text(json.dumps(metadata))
     repeat.validate_selected_identity({"case_a": run}, repeat.resolve_environment(_environment(), profile="synthetic"))
     metadata["requested_model"] = "other"
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(repeat.RepeatError, match="model"):
-        repeat.validate_selected_identity({"case_a": run}, repeat.resolve_environment(_environment(), profile="synthetic"))
+        repeat.validate_selected_identity(
+            {"case_a": run}, repeat.resolve_environment(_environment(), profile="synthetic")
+        )
     metadata_path.write_text("{broken")
     with pytest.raises(repeat.RepeatError, match="unreadable"):
-        repeat.validate_selected_identity({"case_a": run}, repeat.resolve_environment(_environment(), profile="synthetic"))
+        repeat.validate_selected_identity(
+            {"case_a": run}, repeat.resolve_environment(_environment(), profile="synthetic")
+        )
 
 
 def test_run_rejects_manual_resume_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "results").mkdir()
     monkeypatch.setattr(repeat.os, "environ", _environment())
     monkeypatch.setattr(repeat, "_host_preflight", lambda *_: pytest.fail("launched"))
-    assert repeat.main([
-        "run", "--credentials", "synthetic", "--repository", str(tmp_path),
-        "--output", str(tmp_path / "results/reproductions/pilot"),
-        "--resume-csv", str(tmp_path / "missing.csv"),
-    ]) == 2
+    assert (
+        repeat.main(
+            [
+                "run",
+                "--credentials",
+                "synthetic",
+                "--repository",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results/reproductions/pilot"),
+                "--resume-csv",
+                str(tmp_path / "missing.csv"),
+            ]
+        )
+        == 2
+    )
 
 
 def test_run_cli_rejects_low_headroom_before_launch(
@@ -854,36 +885,58 @@ def test_run_cli_continues_sequential_suite_with_low_host_memory(
     monkeypatch.setattr(repeat.os, "environ", _environment())
     floors: list[float] = []
     monkeypatch.setattr(repeat.time, "sleep", lambda *_: None)
+
     def low_memory(_repo: Path, _image: str, threshold: float) -> None:
         floors.append(threshold)
         repeat.check_headroom(
-            available_bytes=2 * 1024**3, free_disk_bytes=20 * 1024**3,
-            docker_memory_bytes=10 * 1024**3, min_available_gib=threshold,
+            available_bytes=2 * 1024**3,
+            free_disk_bytes=20 * 1024**3,
+            docker_memory_bytes=10 * 1024**3,
+            min_available_gib=threshold,
         )
+
     monkeypatch.setattr(repeat, "_host_preflight", low_memory)
     monkeypatch.setattr(repeat, "_prepared_runtime_preflight", lambda: None)
     monkeypatch.setattr(repeat, "finalize", lambda *_: (0, 0))
     monkeypatch.setattr(repeat, "SREGYM_LITE_PROBLEMS", list(repeat.SREGYM_LITE_PROBLEMS)[:2])
+
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         case = command[command.index("--problem") + 1]
         batch = tmp_path / "results" / f"0930_12{len(floors):02d}"
         batch.mkdir()
         _run(batch, case)
         return subprocess.CompletedProcess(command, 0)
+
     monkeypatch.setattr(repeat.subprocess, "run", fake_run)
-    assert repeat.main([
-        "run", "--credentials", "synthetic", "--repository", str(tmp_path),
-        "--output", str(tmp_path / "results/reproductions/pilot"),
-    ]) == 0
+    assert (
+        repeat.main(
+            [
+                "run",
+                "--credentials",
+                "synthetic",
+                "--repository",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results/reproductions/pilot"),
+            ]
+        )
+        == 0
+    )
     assert floors == [6.0, 6.0]
     assert capsys.readouterr().err.count("Warning") == 2
 
 
 def test_low_memory_check_warns_in_a_real_subprocess() -> None:
     result = subprocess.run(
-        [sys.executable, "-c", "from sregym.results.assistant_v3_lite_repeat import check_headroom; "
-         "check_headroom(available_bytes=2*1024**3, free_disk_bytes=20*1024**3, docker_memory_bytes=10*1024**3)"],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            "-c",
+            "from sregym.results.assistant_v3_lite_repeat import check_headroom; "
+            "check_headroom(available_bytes=2*1024**3, free_disk_bytes=20*1024**3, docker_memory_bytes=10*1024**3)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0
     assert "Warning" in result.stderr and "continuing" in result.stderr
@@ -921,13 +974,93 @@ def test_host_preflight_uses_docker_limit_and_rejects_missing_image(
         repeat._host_preflight(tmp_path, "missing:tag")
 
 
+@pytest.mark.parametrize("memory_gib", [4, 10])
+def test_host_preflight_uses_podman_memory_and_enforces_runtime_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_gib: int,
+) -> None:
+    class Memory:
+        available = 7 * 1024**3
+
+    class Disk:
+        free = 20 * 1024**3
+
+    monkeypatch.setattr(repeat.psutil, "virtual_memory", lambda: Memory())
+    monkeypatch.setattr(repeat.shutil, "disk_usage", lambda *_: Disk())
+    calls: list[list[str]] = []
+
+    def podman(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command == ["docker", "info", "--format", "{{.MemTotal}}"]:
+            raise subprocess.CalledProcessError(1, command, stderr="can't evaluate field MemTotal")
+        if command == ["docker", "info", "--format", "{{.Host.MemTotal}}"]:
+            return subprocess.CompletedProcess(command, 0, stdout=str(memory_gib * 1024**3))
+        assert command == ["docker", "image", "inspect", "image:tag"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(repeat.subprocess, "run", podman)
+    if memory_gib < 8:
+        with pytest.raises(repeat.RepeatError, match="allocated less than 8 GiB"):
+            repeat._host_preflight(tmp_path, "image:tag")
+    else:
+        repeat._host_preflight(tmp_path, "image:tag")
+    assert calls == [
+        ["docker", "info", "--format", "{{.MemTotal}}"],
+        ["docker", "info", "--format", "{{.Host.MemTotal}}"],
+        ["docker", "image", "inspect", "image:tag"],
+    ]
+
+
+@pytest.mark.parametrize("runtime", ["docker", "podman"])
+def test_host_preflight_cli_accepts_docker_and_podman(tmp_path: Path, runtime: str) -> None:
+    """Exercise CLI subprocess boundaries without requiring either daemon in CI."""
+    executable = tmp_path / "docker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args[:2] == ['info', '--format'] and len(args) == 3:\n"
+        "    field = '{{.MemTotal}}' if os.environ['TEST_RUNTIME'] == 'docker' else '{{.Host.MemTotal}}'\n"
+        "    if args[2] != field:\n"
+        "        print('unsupported memory field', file=sys.stderr)\n"
+        "        sys.exit(1)\n"
+        "    print(10 * 1024**3)\n"
+        "elif args == ['image', 'inspect', 'image:tag']:\n"
+        "    pass\n"
+        "else:\n"
+        "    sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    environment = dict(repeat.os.environ)
+    environment.update(PATH=f"{tmp_path}:{environment.get('PATH', '')}", TEST_RUNTIME=runtime)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; from sregym.results.assistant_v3_lite_repeat import _host_preflight; "
+            "_host_preflight(Path.cwd(), 'image:tag'); print('preflight passed')",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "preflight passed" in result.stdout
+
+
 def test_prepared_runtime_preflight_requires_ready_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
     def kubectl(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         return subprocess.CompletedProcess(
-            command, 0,
+            command,
+            0,
             stdout=json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "True"}]}}]}),
         )
 
@@ -970,9 +1103,7 @@ def test_prepared_runtime_preflight_rejects_kubectl_error(monkeypatch: pytest.Mo
     assert "private context" not in str(error.value)
 
 
-def test_run_does_not_launch_when_cluster_preflight_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_does_not_launch_when_cluster_preflight_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "results").mkdir()
     monkeypatch.setattr(repeat.os, "environ", _environment())
     monkeypatch.setattr(repeat, "_host_preflight", lambda *_: None)
@@ -980,10 +1111,20 @@ def test_run_does_not_launch_when_cluster_preflight_fails(
         repeat, "_prepared_runtime_preflight", lambda *_: (_ for _ in ()).throw(repeat.RepeatError("not ready"))
     )
     monkeypatch.setattr(repeat.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("launched runner"))
-    assert repeat.main([
-        "run", "--credentials", "synthetic", "--repository", str(tmp_path),
-        "--output", str(tmp_path / "results/reproductions/pilot"),
-    ]) == 2
+    assert (
+        repeat.main(
+            [
+                "run",
+                "--credentials",
+                "synthetic",
+                "--repository",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results/reproductions/pilot"),
+            ]
+        )
+        == 2
+    )
 
 
 def test_finalize_cli_does_not_start_docker_and_rejects_external_output(

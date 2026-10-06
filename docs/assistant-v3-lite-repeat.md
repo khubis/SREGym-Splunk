@@ -264,6 +264,11 @@ remaining capacity or a prediction of the next case's needs. Monitor host/Docker
 memory and stop if pressure becomes severe. Disk/Docker checks remain start
 gates, not a guarantee against later pressure. The wrapper never prunes resources.
 
+The runtime-memory check supports Docker and Podman exposed through the `docker`
+command. It uses Docker's `MemTotal` field first, then Podman's `Host.MemTotal`
+if the first command fails. It reads the actual reported capacity and keeps the
+8 GiB runtime-memory requirement and prebuilt-image check unchanged.
+
 ## Recover or review a partial batch
 
 Every attempt is checkpointed in its raw timestamped batch. The wrapper also

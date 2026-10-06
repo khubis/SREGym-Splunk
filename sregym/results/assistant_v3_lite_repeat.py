@@ -128,7 +128,8 @@ def check_headroom(
             f"Warning: {available_bytes / _GIB:.1f} GiB available host memory is below "
             f"the {min_available_gib:g} GiB advisory threshold; continuing. "
             "Monitor host/Docker memory; this snapshot does not predict case requirements.",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
     if free_disk_bytes < 10 * _GIB:
         raise RepeatError("less than 10 GiB free disk")
@@ -303,10 +304,7 @@ def write_campaign_summary(
             lines.append(f"| {case_id} | valid | {score:g} | {evidence} | {links} |")
             continue
         attempts = [
-            run
-            for batch in batches
-            for run in sorted((batch / "assistant_v3" / case_id).glob("run_*"))
-            if run.is_dir()
+            run for batch in batches for run in sorted((batch / "assistant_v3" / case_id).glob("run_*")) if run.is_dir()
         ]
         if not attempts:
             lines.append(f"| {case_id} | missing | — | — | — |")
@@ -331,7 +329,8 @@ def write_campaign_summary(
     attempt_label = "attempt" if len(scores) == 1 else "attempts"
     mean = (
         f"{sum(scores) / len(scores):g}/100 across {len(scores)} valid {attempt_label}"
-        if scores else "unavailable (0 valid attempts)"
+        if scores
+        else "unavailable (0 valid attempts)"
     )
     lines[4:4] = [
         f"Benchmark mean: **{mean}**. Invalid: {invalid_count}; "
@@ -347,9 +346,23 @@ def write_campaign_summary(
 
 def _host_preflight(repository: Path, agent_image: str, min_available_gib: float = 6.0) -> None:
     try:
-        result = subprocess.run(
-            ["docker", "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True, timeout=20, check=True
-        )
+        try:
+            result = subprocess.run(
+                ["docker", "info", "--format", "{{.MemTotal}}"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            # Podman's Docker-compatible CLI nests memory in its Host report.
+            result = subprocess.run(
+                ["docker", "info", "--format", "{{.Host.MemTotal}}"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=True,
+            )
         docker_memory = int(result.stdout.strip())
         subprocess.run(["docker", "image", "inspect", agent_image], capture_output=True, timeout=20, check=True)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -396,15 +409,17 @@ def _prepared_runtime_preflight() -> None:
         nodes = json.loads(response.stdout)["items"]
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         raise RepeatError("Kubernetes nodes are not ready or selected context is unavailable") from error
-    if not isinstance(nodes, list) or not nodes or any(
-        not isinstance(node, dict)
-        or not any(
-            isinstance(condition, dict)
-            and condition.get("type") == "Ready"
-            and condition.get("status") == "True"
-            for condition in node.get("status", {}).get("conditions", [])
+    if (
+        not isinstance(nodes, list)
+        or not nodes
+        or any(
+            not isinstance(node, dict)
+            or not any(
+                isinstance(condition, dict) and condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in node.get("status", {}).get("conditions", [])
+            )
+            for node in nodes
         )
-        for node in nodes
     ):
         raise RepeatError("Kubernetes nodes are not ready")
 
@@ -488,12 +503,16 @@ def load_campaign(
     if not isinstance(state, dict) or state.get("version") != 1 or state.get("fingerprint") != fingerprint:
         raise RepeatError("campaign record belongs to a different target or configuration")
     batches = state.get("batches")
-    if not isinstance(batches, list) or any(
-        not isinstance(name, str)
-        or re.fullmatch(r"\d{4}_\d{4}", name) is None
-        or not (repository / "results" / name).is_dir()
-        for name in batches
-    ) or len(batches) != len(set(batches)):
+    if (
+        not isinstance(batches, list)
+        or any(
+            not isinstance(name, str)
+            or re.fullmatch(r"\d{4}_\d{4}", name) is None
+            or not (repository / "results" / name).is_dir()
+            for name in batches
+        )
+        or len(batches) != len(set(batches))
+    ):
         raise RepeatError("campaign record contains an invalid batch path")
     pending = state.get("pending")
     if pending is not None and (
@@ -642,7 +661,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--resume-csv", type=Path)
     parser.add_argument("--agent-image", default="sregym-agent-base:latest")
     parser.add_argument(
-        "--min-available-gib", type=float, default=6.0,
+        "--min-available-gib",
+        type=float,
+        default=6.0,
         help="host-memory warning threshold only (4–6 GiB); low memory does not block or wait",
     )
     args = parser.parse_args(argv)
@@ -666,7 +687,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except BlockingIOError as error:
                     raise RepeatError("another Lite wrapper run is already active") from error
                 return run_campaign(
-                    repository, output, expected, environment,
+                    repository,
+                    output,
+                    expected,
+                    environment,
                     profile=args.credentials,
                     agent_image=args.agent_image,
                     min_available_gib=args.min_available_gib,
