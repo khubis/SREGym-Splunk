@@ -33,6 +33,7 @@ class LiteLLMBackend:
         provider: str | None = None,
         usage_available: bool = True,
         retry: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ):
         self.model_name = model_name
         self.api_key = api_key
@@ -40,6 +41,7 @@ class LiteLLMBackend:
         self.provider = provider
         self.usage_available = usage_available
         self.retry = retry
+        self.extra_headers = dict(extra_headers or {})
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
@@ -122,13 +124,17 @@ class LiteLLMBackend:
 
         # Anthropic prompt caching (rolling: system prefix + last message).
         # Nested under model_kwargs; ignored for non-Anthropic via drop_params.
+        if self.extra_headers:
+            model_config["model_kwargs"] = {"extra_headers": self.extra_headers}
         if self._uses_anthropic_cache_control():
-            model_config["model_kwargs"] = {
-                "cache_control_injection_points": [
-                    {"location": "message", "role": "system"},
-                    {"location": "message", "index": -1},
-                ]
-            }
+            model_config.setdefault("model_kwargs", {}).update(
+                {
+                    "cache_control_injection_points": [
+                        {"location": "message", "role": "system"},
+                        {"location": "message", "index": -1},
+                    ]
+                }
+            )
 
         if not self.retry:
             model_config["max_retries"] = 0

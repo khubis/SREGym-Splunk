@@ -5,6 +5,7 @@
 [![Overview](https://img.shields.io/badge/%F0%9F%94%8D-Overview-blue?style=flat-square)](#overview)
 [![Installation](https://img.shields.io/badge/%F0%9F%93%A6-Installation-blue?style=flat-square)](#📦installation)
 [![Quick Start](https://img.shields.io/badge/%F0%9F%9A%80-Quick%20Start-blue?style=flat-square)](#🚀quickstart)
+[Splunk Lite setup](#splunk-adapted-assistant-v3-lite-pilot-this-fork)
 [![Usage](https://img.shields.io/badge/%E2%9A%99%EF%B8%8F-Usage-blue?style=flat-square)](#⚙️usage)
 [![Contributing](https://img.shields.io/badge/%F0%9F%A4%9D-Contributing-blue?style=flat-square)](./CONTRIBUTING.md)
 [![Leaderboard](https://img.shields.io/badge/%F0%9F%8F%86-Leaderboard-blue?style=flat-square)](https://sregym.com/leaderboard)
@@ -31,6 +32,41 @@ SREGym has been used to simulate real-world cloud failures, such as:
 <h2 id="🚀SREGym-Lite">🚀🚀🚀 Start with SREGym-Lite</h2>
 
 [SREGym-Lite](./docs/SREGym-Lite.md) is a curated set of 17 representative problems with varied difficulty levels that are friendly to run. It is the recommended starting point for new users and can run easily on a [Kind](https://kind.sigs.k8s.io/) setup with 8 vCPU and 16 GB of memory.
+
+### Splunk-adapted Assistant V3 Lite pilot (this fork)
+
+This fork can ingest a Lite case into Splunk, invoke a separately running
+LangChain Deep Agents Assistant V3 server, verify representative telemetry,
+and package its answer, judge score, and trace. The upstream quickstart below
+uses a different, native-observability workflow.
+
+1. Complete the [Splunk Lite setup](./docs/assistant-v3-lite-repeat.md): a Ready
+   Kind cluster, prebuilt agent image, a running Assistant V3 connected to the
+   same Splunk org, and a private copy of the
+   [runner environment template](./.env.splunk-lite.example) at `.env.splunk-lite`
+   and [Assistant server template](./.env.assistant-v3-splunk.example) in the
+   separate Assistant checkout. The setup includes an embedding preflight:
+   V3 semantic memory must explicitly opt in to the gateway embedding route,
+   using [Assistant MR !3836](https://cd.splunkdev.com/observability/ai/assistant/-/merge_requests/3836)
+   (internal access required; use its branch until merged) and a fresh memory database.
+2. From this SREGym checkout, run one case with one command:
+
+   ```bash
+   uv run --env-file .env.splunk-lite --no-sync python -m sregym.results.assistant_v3_lite_repeat run --credentials synthetic --problem cronjob_sidecar_blocks_completion_hotel_reservation --output results/reproductions/cronjob-smoke
+   ```
+
+   Or run all 21 Lite cases sequentially:
+
+   ```bash
+   uv run --env-file .env.splunk-lite --no-sync python -m sregym.results.assistant_v3_lite_repeat run --credentials synthetic --output results/reproductions/lite-21
+   ```
+
+   Repeat the same command and output folder to resume. Open `summary.md`
+   under that output folder for scores and links to case artifacts.
+
+The `svelte`, symptom-guided Splunk pilot is **not leaderboard-comparable**.
+The one-line command runs the evaluation after setup; it does not provision
+Kind, Splunk, or the separately running Assistant server.
 
 
 <h2 id="📦installation">📦 Installation</h2>

@@ -123,6 +123,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.splunk-lite
 # Local Assistant authentication material
 .local/
 .venv

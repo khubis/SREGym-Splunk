@@ -56,6 +56,8 @@ _REQUIRED = (
     "JUDGE_API_KEY",
     "JUDGE_API_BASE",
 )
+_DEFAULT_JUDGE_MODEL = "azure/gpt-5.6-luna"
+_JUDGE_MODELS = {_DEFAULT_JUDGE_MODEL, "openai/gpt-5.6-luna"}
 _GIB = 1024**3
 _EXPECTED_CHECKS = frozenset({"metrics", "traces", "logs", "kubernetes_events", "pods", "events"})
 _SUMMARY_LINKS = {
@@ -88,24 +90,60 @@ def resolve_environment(source: Mapping[str, str], *, profile: str) -> dict[str,
     missing = [name for name in _REQUIRED if not result.get(name)]
     if missing:
         raise RepeatError("missing required environment: " + ", ".join(missing))
+    judge_model = result.get("SREGYM_LITE_JUDGE_MODEL", _DEFAULT_JUDGE_MODEL).strip()
+    if judge_model not in _JUDGE_MODELS:
+        raise RepeatError("SREGYM_LITE_JUDGE_MODEL must be azure/gpt-5.6-luna or openai/gpt-5.6-luna")
+    result["SREGYM_LITE_JUDGE_MODEL"] = judge_model
+    service = result.get("SREGYM_LLM_GATEWAY_SERVICE_NAME", "").strip()
+    gateway_org = result.get("SREGYM_LLM_GATEWAY_ORG_ID", "").strip()
+    if service:
+        if judge_model != "openai/gpt-5.6-luna":
+            raise RepeatError("gateway headers require SREGYM_LITE_JUDGE_MODEL=openai/gpt-5.6-luna")
+        if gateway_org and gateway_org != result["ORG_ID"]:
+            raise RepeatError("gateway org differs from the target Splunk org")
+        result["SREGYM_LLM_GATEWAY_ORG_ID"] = result["ORG_ID"]
+        result["SREGYM_LLM_GATEWAY_SERVICE_NAME"] = service
+    elif gateway_org:
+        raise RepeatError("SREGYM_LLM_GATEWAY_ORG_ID requires SREGYM_LLM_GATEWAY_SERVICE_NAME")
     return result
+
+
+def prepare_helm_environment(environment: dict[str, str], repository: Path) -> None:
+    """Keep unrelated user chart repositories out of benchmark dependency updates."""
+    root = repository / ".local/helm"
+    config = Path(environment.setdefault("HELM_REPOSITORY_CONFIG", str(root / "repositories.yaml")))
+    cache = Path(environment.setdefault("HELM_REPOSITORY_CACHE", str(root / "repository")))
+    config.parent.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
 
 
 def check_headroom(
     *, available_bytes: int, free_disk_bytes: int, docker_memory_bytes: int, min_available_gib: float = 6.0
 ) -> None:
-    """Conservative 16 GiB laptop gate; never auto-prune user resources."""
+    """Warn on host memory; require disk/Docker capacity, never auto-prune."""
     if not 4.0 <= min_available_gib <= 6.0:
         raise RepeatError("memory floor must be between 4 and 6 GiB")
     if available_bytes < min_available_gib * _GIB:
-        raise RepeatError(f"less than {min_available_gib:g} GiB available host memory")
+        print(
+            f"Warning: {available_bytes / _GIB:.1f} GiB available host memory is below "
+            f"the {min_available_gib:g} GiB advisory threshold; continuing. "
+            "Monitor host/Docker memory; this snapshot does not predict case requirements.",
+            file=sys.stderr, flush=True,
+        )
     if free_disk_bytes < 10 * _GIB:
         raise RepeatError("less than 10 GiB free disk")
     if docker_memory_bytes < 8 * _GIB:
         raise RepeatError("Docker is allocated less than 8 GiB memory")
 
 
-def suite_command(*, repository: Path, agent_image: str, problem: str | None, resume_csv: Path | None) -> list[str]:
+def suite_command(
+    *,
+    repository: Path,
+    agent_image: str,
+    problem: str | None,
+    resume_csv: Path | None,
+    judge_model: str = _DEFAULT_JUDGE_MODEL,
+) -> list[str]:
     if problem is not None and problem not in SREGYM_LITE_PROBLEMS:
         raise RepeatError(f"not a Lite case: {problem}")
     if resume_csv is not None and not resume_csv.is_file():
@@ -128,7 +166,7 @@ def suite_command(*, repository: Path, agent_image: str, problem: str | None, re
         "--reasoning-effort",
         "medium",
         "--judge-model",
-        "azure/gpt-5.6-luna",
+        judge_model,
         "--judge-backend",
         "api",
         "--observability-provider",
@@ -184,7 +222,7 @@ def validate_selected_identity(selected: Mapping[str, Path], environment: Mappin
         "logs_connection_id": environment["SPLUNK_LOGS_CONNECTION_ID"],
         "requested_model": "gpt-5.6-luna",
         "requested_reasoning": "medium",
-        "judge_model": "azure/gpt-5.6-luna",
+        "judge_model": environment.get("SREGYM_LITE_JUDGE_MODEL", _DEFAULT_JUDGE_MODEL),
     }
     for case_id, run in selected.items():
         try:
@@ -399,7 +437,9 @@ def _campaign_fingerprint(
         "deployment_profile": "svelte",
         "prompt_arm": "symptom_guided",
         "agent_model": "gpt-5.6-luna",
-        "judge_model": "azure/gpt-5.6-luna",
+        "judge_model": environment.get("SREGYM_LITE_JUDGE_MODEL", _DEFAULT_JUDGE_MODEL),
+        "judge_endpoint": environment["JUDGE_API_BASE"],
+        "judge_gateway_service": environment.get("SREGYM_LLM_GATEWAY_SERVICE_NAME", ""),
         "agent_timeout_seconds": 1200,
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -566,7 +606,13 @@ def run_campaign(
             raise RepeatError("a raw batch already exists for this minute; wait before running")
         state["pending"] = {"case_id": case_id, "before": sorted(before)}
         save_campaign(output, state)
-        command = suite_command(repository=repository, agent_image=agent_image, problem=case_id, resume_csv=None)
+        command = suite_command(
+            repository=repository,
+            agent_image=agent_image,
+            problem=case_id,
+            resume_csv=None,
+            judge_model=environment.get("SREGYM_LITE_JUDGE_MODEL", _DEFAULT_JUDGE_MODEL),
+        )
         command += ["--allow-agent-endpoint", environment["ASSISTANT_V3_URL"]]
         result = subprocess.run(command, cwd=repository, env=environment, check=False)
         state = recover_pending(output, repository, state)
@@ -595,11 +641,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--problem", choices=SREGYM_LITE_PROBLEMS)
     parser.add_argument("--resume-csv", type=Path)
     parser.add_argument("--agent-image", default="sregym-agent-base:latest")
-    parser.add_argument("--min-available-gib", type=float, default=6.0)
+    parser.add_argument(
+        "--min-available-gib", type=float, default=6.0,
+        help="host-memory warning threshold only (4–6 GiB); low memory does not block or wait",
+    )
     args = parser.parse_args(argv)
     try:
         environment = resolve_environment(os.environ, profile=args.credentials)
         repository = args.repository.resolve(strict=True)
+        prepare_helm_environment(environment, repository)
         output = args.output.resolve()
         if output == repository / "results" or not output.is_relative_to(repository / "results"):
             raise RepeatError("output must be a named folder under repository/results")

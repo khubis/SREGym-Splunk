@@ -1,5 +1,10 @@
 # Assistant v3 evaluations with Splunk
 
+For a first local run, use the [Splunk Lite quickstart](assistant-v3-lite-repeat.md)
+and its gateway-ready env template. The lower-level examples in this document
+include historical direct-Azure settings and are not the recommended lab0
+laptop setup.
+
 This workflow runs the existing Assistant v3 product surface against SREGym-Lite diagnosis cases. SRE Gym deploys and faults the application, exports metrics, traces, container logs, and Kubernetes events to Splunk, waits until all four signals are queryable, and then starts one fresh Assistant session. The existing SRE Gym diagnosis judge remains authoritative.
 
 Use `--profile full` for comparable results. `--profile svelte` is useful for a lower-cost smoke test, but its persisted `comparable` value is `false` and it must not be compared with full-profile results.

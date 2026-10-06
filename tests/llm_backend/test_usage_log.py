@@ -65,6 +65,27 @@ def test_failed_request_does_not_create_usage_record(monkeypatch, tmp_path):
     assert not usage_log.exists()
 
 
+def test_gateway_headers_reach_chat_litellm(monkeypatch):
+    captured = {}
+
+    class CapturingChatLiteLLM(FakeChatLiteLLM):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(backend_module, "ChatLiteLLM", CapturingChatLiteLLM)
+    backend = LiteLLMBackend(
+        "openai/gpt-5.6-luna",
+        usage_available=False,
+        extra_headers={"X-Org-ID": "org", "X-Service-Name": "sregym"},
+    )
+    backend.inference("check")
+
+    assert captured["model_kwargs"]["extra_headers"] == {
+        "X-Org-ID": "org",
+        "X-Service-Name": "sregym",
+    }
+
+
 def test_summarize_usage_ignores_partial_final_line(tmp_path):
     usage_log = tmp_path / "stratus_usage.jsonl"
     usage_log.write_text(

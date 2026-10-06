@@ -1,6 +1,7 @@
 import os
 
 from llm_backend.get_llm_backend import LiteLLMBackend
+from llm_backend.gateway_headers import gateway_headers
 
 
 def get_llm_backend(
@@ -13,6 +14,7 @@ def get_llm_backend(
     max_tokens: int | None = None,
     usage_available: bool = True,
     retry: bool = True,
+    extra_headers: dict[str, str] | None = None,
 ) -> LiteLLMBackend:
     """Initialize an LLM backend for the given litellm model string."""
     endpoint_status = "set" if api_base else "unset"
@@ -27,6 +29,7 @@ def get_llm_backend(
         max_tokens=max_tokens,
         usage_available=usage_available,
         retry=retry,
+        extra_headers=extra_headers,
     )
 
 
@@ -72,4 +75,5 @@ def get_llm_backend_for_judge(
         max_tokens=max_tokens,
         usage_available=not bool(bridge_url),
         retry=not bool(bridge_url),
+        extra_headers=gateway_headers() if not bridge_url and model_id.startswith("openai/") else None,
     )

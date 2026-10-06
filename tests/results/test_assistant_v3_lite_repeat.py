@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import runpy
 import subprocess
 import sys
@@ -13,6 +14,62 @@ from pathlib import Path
 import pytest
 
 from sregym.results import assistant_v3_lite_repeat as repeat
+
+
+def test_splunk_lite_env_example_matches_wrapper_requirements_without_secrets() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    template = (repository / ".env.splunk-lite.example").read_text(encoding="utf-8")
+    names = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", template, re.MULTILINE))
+    required = set(repeat._ALIASES) | (set(repeat._REQUIRED) - set(repeat._ALIASES.values()))
+
+    assert required <= names.keys()
+    assert not set(repeat._ALIASES.values()) & names.keys()
+    assert all(
+        value.strip() == '""'
+        for name, value in names.items()
+        if name.endswith(("TOKEN", "KEY")) and name != "JUDGE_API_KEY"
+    )
+    assert names["JUDGE_API_KEY"].strip() == '"unused-placeholder"'
+    assert names["SREGYM_LITE_JUDGE_MODEL"].strip() == '"openai/gpt-5.6-luna"'
+    assert names["SREGYM_LLM_GATEWAY_SERVICE_NAME"].strip() == '"sregym"'
+    assert names["JUDGE_API_BASE"].strip() == '"https://llm-gateway.lab0.signalfx.com/openai/v1"'
+    assert "SREGYM_LLM_GATEWAY_ORG_ID" not in names
+    assert "./.env.splunk-lite.example" in (repository / "README.md").read_text(encoding="utf-8")
+    assert "../.env.splunk-lite.example" in (repository / "docs/assistant-v3-lite-repeat.md").read_text(
+        encoding="utf-8"
+    )
+    assert "--env-file .env.splunk-lite" in (repository / "README.md").read_text(encoding="utf-8")
+    assert "--env-file .env.splunk-lite" in (repository / "docs/assistant-v3-lite-repeat.md").read_text(
+        encoding="utf-8"
+    )
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", ".env.splunk-lite"], cwd=repository, check=False
+    )
+    assert ignored.returncode == 0
+
+
+def test_assistant_env_example_separates_gateway_embeddings_and_eval_memory() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    template = (repository / ".env.assistant-v3-splunk.example").read_text(encoding="utf-8")
+    names = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", template, re.MULTILINE))
+
+    for key in ("SF_TOKEN", "SFX_REALM", "ORG_ID", "USER_ID"):
+        assert names[key] == '""'
+    assert names["USE_LLM_GATEWAY_SERVICE"] == "true"
+    assert names["ASSISTANT_V3_USE_LLM_GATEWAY_SERVICE"] == "true"
+    assert names["ASSISTANT_V3_MEMORY_USE_LLM_GATEWAY_SERVICE"] == "true"
+    assert names["ASSISTANT_V3_MEMORY_EMBEDDING_MODEL"] == "text-embedding-3-large"
+    assert names["LLM_GATEWAY_SERVICE_URL"] == names["ASSISTANT_V3_LLM_GATEWAY_SERVICE_URL"]
+    assert names["USE_OPENAI_PROXY"] == "false"
+    assert names["DEEPEVAL_FILE_SYSTEM"] == "READ_ONLY"
+    assert names["DEEPEVAL_CACHE_FOLDER"] == ".local/deepeval"
+    assert "LLM_PROXY_SF_TOKEN" not in names
+    assert "OPENAI_API_KEY" not in names
+    assert names["MEMORY_PG_DATABASE"] == names["AIMEMORY_DB_NAME"]
+    assert names["ASSISTANT_V3_O11Y_POSTGRES_DATABASE"] == names["TOOL_DB_NAME"]
+    databases = {names[key] for key in ("POSTGRES_DATABASE", "AIMEMORY_DB_NAME", "TOOL_DB_NAME")}
+    assert len(databases) == 3
+    assert all(database.startswith("sregym_") for database in databases)
 
 
 def _environment() -> dict[str, str]:
@@ -55,6 +112,21 @@ def test_canonical_profile_does_not_use_synthetic_fallback() -> None:
         repeat.resolve_environment(_environment(), profile="canonical")
 
 
+def test_helm_environment_is_local_to_checkout_and_preserves_explicit_overrides(tmp_path: Path) -> None:
+    environment = _environment()
+    repeat.prepare_helm_environment(environment, tmp_path)
+
+    assert environment["HELM_REPOSITORY_CONFIG"] == str(tmp_path / ".local/helm/repositories.yaml")
+    assert environment["HELM_REPOSITORY_CACHE"] == str(tmp_path / ".local/helm/repository")
+    assert Path(environment["HELM_REPOSITORY_CACHE"]).is_dir()
+    assert not Path(environment["HELM_REPOSITORY_CONFIG"]).exists()
+
+    explicit = dict(environment, HELM_REPOSITORY_CONFIG=str(tmp_path / "custom/repos.yaml"))
+    repeat.prepare_helm_environment(explicit, tmp_path)
+    assert explicit["HELM_REPOSITORY_CONFIG"] == str(tmp_path / "custom/repos.yaml")
+    assert (tmp_path / "custom").is_dir()
+
+
 def test_canonical_profile_accepts_complete_names_without_aliases() -> None:
     source = _environment()
     for alias, canonical in repeat._ALIASES.items():
@@ -74,10 +146,56 @@ def test_judge_credentials_are_required_before_launch() -> None:
         repeat.resolve_environment(source, profile="synthetic")
 
 
-def test_headroom_gate_fails_closed() -> None:
+def test_gateway_judge_uses_target_org_without_repeating_org_id() -> None:
+    source = _environment()
+    source["SREGYM_LITE_JUDGE_MODEL"] = "openai/gpt-5.6-luna"
+    source["SREGYM_LLM_GATEWAY_SERVICE_NAME"] = "sregym"
+    mapped = repeat.resolve_environment(source, profile="synthetic")
+
+    assert mapped["SREGYM_LLM_GATEWAY_ORG_ID"] == "synthetic-org"
+    assert mapped["SREGYM_LITE_JUDGE_MODEL"] == "openai/gpt-5.6-luna"
+    assert repeat._campaign_fingerprint(["network_policy_block"], mapped, "synthetic", "image:tag") != (
+        repeat._campaign_fingerprint(
+            ["network_policy_block"],
+            repeat.resolve_environment(_environment(), profile="synthetic"),
+            "synthetic",
+            "image:tag",
+        )
+    )
+
+    changed_endpoint = dict(mapped, JUDGE_API_BASE="https://other-gateway.example.test/openai/v1")
+    assert repeat._campaign_fingerprint(["network_policy_block"], mapped, "synthetic", "image:tag") != (
+        repeat._campaign_fingerprint(["network_policy_block"], changed_endpoint, "synthetic", "image:tag")
+    )
+
+
+def test_gateway_judge_rejects_mismatched_org_or_unsupported_model() -> None:
+    source = _environment()
+    source.update(
+        SREGYM_LITE_JUDGE_MODEL="openai/gpt-5.6-luna",
+        SREGYM_LLM_GATEWAY_SERVICE_NAME="sregym",
+        SREGYM_LLM_GATEWAY_ORG_ID="different-org",
+    )
+    with pytest.raises(repeat.RepeatError, match="gateway org"):
+        repeat.resolve_environment(source, profile="synthetic")
+
+    source["SREGYM_LLM_GATEWAY_ORG_ID"] = "synthetic-org"
+    source["SREGYM_LITE_JUDGE_MODEL"] = "openai/other-model"
+    with pytest.raises(repeat.RepeatError, match="SREGYM_LITE_JUDGE_MODEL"):
+        repeat.resolve_environment(source, profile="synthetic")
+
+
+def test_low_host_memory_warns_without_blocking(capsys: pytest.CaptureFixture[str]) -> None:
     gib = 1024**3
-    with pytest.raises(repeat.RepeatError, match="memory"):
-        repeat.check_headroom(available_bytes=2 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib)
+    repeat.check_headroom(available_bytes=2 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib)
+    warning = capsys.readouterr().err
+    assert "Warning" in warning
+    assert "2" in warning and "6" in warning
+    assert "continuing" in warning
+
+
+def test_disk_and_docker_checks_still_fail_closed() -> None:
+    gib = 1024**3
     with pytest.raises(repeat.RepeatError, match="disk"):
         repeat.check_headroom(available_bytes=7 * gib, free_disk_bytes=2 * gib, docker_memory_bytes=10 * gib)
     with pytest.raises(repeat.RepeatError, match="Docker"):
@@ -113,17 +231,18 @@ def test_resource_wait_retries_only_transient_memory_pressure(monkeypatch: pytes
         repeat.wait_for_host_preflight(tmp_path, "image:tag", 4.0, retries=1)
 
 
-def test_single_case_memory_override_keeps_a_four_gib_floor() -> None:
+def test_memory_override_changes_warning_threshold(capsys: pytest.CaptureFixture[str]) -> None:
     gib = 1024**3
     repeat.check_headroom(
         available_bytes=4.2 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
         min_available_gib=4.0,
     )
-    with pytest.raises(repeat.RepeatError, match="memory"):
-        repeat.check_headroom(
-            available_bytes=3.9 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
-            min_available_gib=4.0,
-        )
+    assert capsys.readouterr().err == ""
+    repeat.check_headroom(
+        available_bytes=3.9 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
+        min_available_gib=4.0,
+    )
+    assert "Warning" in capsys.readouterr().err
     with pytest.raises(repeat.RepeatError, match="memory floor"):
         repeat.check_headroom(
             available_bytes=7 * gib, free_disk_bytes=20 * gib, docker_memory_bytes=10 * gib,
@@ -143,6 +262,14 @@ def test_suite_command_is_sequential_pilot_configuration(tmp_path: Path) -> None
     assert command[command.index("--assistant-prompt-arm") + 1] == "symptom_guided"
     assert "--force-build" not in command
     assert command[command.index("--agent-timeout") + 1] == "1200"
+    gateway_command = repeat.suite_command(
+        repository=tmp_path,
+        agent_image="sregym-agent-base:latest",
+        problem="network_policy_block",
+        resume_csv=None,
+        judge_model="openai/gpt-5.6-luna",
+    )
+    assert gateway_command[gateway_command.index("--judge-model") + 1] == "openai/gpt-5.6-luna"
 
     with pytest.raises(repeat.RepeatError, match="resume CSV"):
         repeat.suite_command(
@@ -720,13 +847,20 @@ def test_run_cli_rejects_low_headroom_before_launch(
     assert exit_code == 2
 
 
-def test_run_cli_accepts_four_gib_floor_for_sequential_suite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_run_cli_continues_sequential_suite_with_low_host_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "results").mkdir()
     monkeypatch.setattr(repeat.os, "environ", _environment())
     floors: list[float] = []
-    monkeypatch.setattr(repeat, "_host_preflight", lambda _repo, _image, floor: floors.append(floor))
+    monkeypatch.setattr(repeat.time, "sleep", lambda *_: None)
+    def low_memory(_repo: Path, _image: str, threshold: float) -> None:
+        floors.append(threshold)
+        repeat.check_headroom(
+            available_bytes=2 * 1024**3, free_disk_bytes=20 * 1024**3,
+            docker_memory_bytes=10 * 1024**3, min_available_gib=threshold,
+        )
+    monkeypatch.setattr(repeat, "_host_preflight", low_memory)
     monkeypatch.setattr(repeat, "_prepared_runtime_preflight", lambda: None)
     monkeypatch.setattr(repeat, "finalize", lambda *_: (0, 0))
     monkeypatch.setattr(repeat, "SREGYM_LITE_PROBLEMS", list(repeat.SREGYM_LITE_PROBLEMS)[:2])
@@ -740,9 +874,19 @@ def test_run_cli_accepts_four_gib_floor_for_sequential_suite(
     assert repeat.main([
         "run", "--credentials", "synthetic", "--repository", str(tmp_path),
         "--output", str(tmp_path / "results/reproductions/pilot"),
-        "--min-available-gib", "4",
     ]) == 0
-    assert floors == [4.0, 4.0]
+    assert floors == [6.0, 6.0]
+    assert capsys.readouterr().err.count("Warning") == 2
+
+
+def test_low_memory_check_warns_in_a_real_subprocess() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "from sregym.results.assistant_v3_lite_repeat import check_headroom; "
+         "check_headroom(available_bytes=2*1024**3, free_disk_bytes=20*1024**3, docker_memory_bytes=10*1024**3)"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0
+    assert "Warning" in result.stderr and "continuing" in result.stderr
 
 
 def test_host_preflight_uses_docker_limit_and_rejects_missing_image(
