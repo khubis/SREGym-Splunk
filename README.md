@@ -68,6 +68,13 @@ The `svelte`, symptom-guided Splunk pilot is **not leaderboard-comparable**.
 The one-line command runs the evaluation after setup; it does not provision
 Kind, Splunk, or the separately running Assistant server.
 
+Assistant startup is documented in [setup step 3](./docs/assistant-v3-lite-repeat.md#3-start-assistant-v3-separately).
+It requires a separate Assistant checkout, its private `.env.sregym`, and a
+successful synthetic-token JWT preflight. After completing those prerequisites,
+start it in a separate terminal with
+`ASSISTANT_V3_ENV_FILE=.env.sregym make -B run-local-server-v3` and wait for
+`Application startup complete` before running the case.
+
 
 <h2 id="📦installation">📦 Installation</h2>
 

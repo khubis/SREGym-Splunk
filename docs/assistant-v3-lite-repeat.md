@@ -63,6 +63,11 @@ dependencies during deployment. Explicit `HELM_REPOSITORY_CONFIG` and
 Copy the [fill-in template](../.env.splunk-lite.example) to the gitignored
 `.env.splunk-lite` in this checkout and fill its Splunk blanks. The JWT can be
 exported in step 3. Do not overwrite an existing private file or commit secrets.
+If you already have a private `.env`, transfer its synthetic identity and HEC
+values into the new file. Keep the new template's local Assistant URL and judge
+route; do not transfer placeholder Assistant values or an old Azure judge
+endpoint. `ASSISTANT_V3_URL` must be the server's HTTP(S) base URL, without an
+API path, and `ASSISTANT_V3_AUTH_TOKEN` must be its raw JWT.
 
 ```bash
 cp -n .env.splunk-lite.example .env.splunk-lite
@@ -73,7 +78,7 @@ chmod 600 .env.splunk-lite
 | Variables | Where to get them / purpose |
 |---|---|
 | `SYNTHETIC_SF_TOKEN`, `SYNTHETIC_REALM`, `SYNTHETIC_ORG_ID`, `SYNTHETIC_USER_ID` | Query token and identity for the **same** synthetic Splunk Observability org. |
-| `SYNTHETIC_SPLUNK_ACCESS_TOKEN` | Org access token with `INGEST` scope for the collector; this is not the SF query token. |
+| `SYNTHETIC_SPLUNK_ACCESS_TOKEN` | Org access token with `INGEST` scope for the collector. Use it for queries as well only if its API permissions have been verified (see the JWT checks below). |
 | `SPLUNK_HOST`, `SPLUNK_HEC_PORT`, `SPLUNK_HEC_TOKEN`, `SPLUNK_LOGS_CONNECTION_ID` | Logs HEC destination and the Logs Observer connection pointing to it. The host is a hostname only. |
 | `ASSISTANT_V3_URL`, `ASSISTANT_V3_AUTH_TOKEN` | Running v3 server URL and its raw bearer JWT (generate below; do not include `Bearer ` in the value). |
 | `SREGYM_LITE_JUDGE_MODEL`, `JUDGE_API_BASE`, `JUDGE_API_KEY` | The template uses the lab0 LLM Gateway (`openai/gpt-5.6-luna` and `/openai/v1`). Its API key is an unused LiteLLM placeholder, not an Azure secret. |
@@ -129,6 +134,30 @@ switching branches. The live qualification used this branch. Do not assume an
 older Assistant checkout recognizes the embedding configuration. After merge,
 a main checkout containing the MR is sufficient.
 
+If you need the separate repository, clone
+`https://cd.splunkdev.com/observability/ai/assistant.git` using your authorized
+GitLab credentials. If SSH fetch reports `Permission denied (publickey)` but
+GitLab CLI authentication works, the HTTPS credential helper is an alternative:
+
+```bash
+# In the Assistant checkout. Authenticate with dev-login gitlab if needed.
+git -c credential.helper='!glab auth git-credential' fetch \
+  https://cd.splunkdev.com/observability/ai/assistant.git \
+  codex/assistant-v3-gateway-embeddings
+# Create this local branch once; if it already exists, use git switch <branch>.
+git switch -c codex/assistant-v3-gateway-embeddings FETCH_HEAD
+```
+
+After selecting the required branch, sync that checkout's locked dependencies:
+
+```bash
+dev-login artifactory >/dev/null
+uv sync --locked
+```
+
+Keep the two repositories' virtual environments separate; their Python
+requirements differ. The Assistant commands use its own `uv` environment.
+
 There are two independently configured model connections:
 
 | Connection | Configuration / requirement |
@@ -166,7 +195,7 @@ set +a
 python3 scripts/local_auth_jwt.py >/dev/null || exit 1  # refresh SF_TOKEN if HTTP 401
 uv run --locked python -c 'import asyncio; from src.server.assistant_v3.semantic_memory.embedder import SemanticMemoryEmbedder; e=SemanticMemoryEmbedder(); v=asyncio.run(e.embed_one("SREGym setup check")); assert len(v)==e.dimension; print("Embedding preflight passed:", len(v), "dimensions")' || exit 1
 make -s postgres-up
-docker exec aiassistantdb createdb -U postgres sregym_gateway_eval
+docker exec aiassistantdb createdb -U postgres "$POSTGRES_DATABASE"
 ASSISTANT_V3_ENV_FILE=.env.sregym make -B run-local-server-v3
 ```
 
@@ -206,6 +235,7 @@ export ASSISTANT_V3_AUTH_TOKEN="$(
   cd "$ASSISTANT_REPO" &&
   SF_TOKEN="$SYNTHETIC_SF_TOKEN" SFX_REALM="$SYNTHETIC_REALM" \
     ORG_ID="$SYNTHETIC_ORG_ID" USER_ID="$SYNTHETIC_USER_ID" \
+    LOCAL_AUTH_JWT_CACHE_FILE=.local/local_auth.sregym.jwt \
     python3 scripts/local_auth_jwt.py
 )"
 ```
@@ -215,9 +245,27 @@ The nonempty shell JWT takes precedence over the blank template entry when
 private `.env.splunk-lite` and refresh it if it expires. Never put it in the
 tracked example.
 
-If either JWT command returns HTTP 401, refresh the synthetic **SF query token**
-in both private env files before proceeding. Replacing the HEC token or the
-collector's INGEST token will not fix this authentication failure.
+If either JWT command returns HTTP 401, the synthetic **SF query token** is
+not accepted. Update `SYNTHETIC_SF_TOKEN` in the runner's private env file and
+`SF_TOKEN` in the Assistant's private env file with a valid token for the same
+org/identity, reload the files, and rerun the JWT command. Do not start a case
+until it succeeds. An existing SignalFx token stored as
+`SYNTHETIC_SPLUNK_ACCESS_TOKEN` can also be used for `SYNTHETIC_SF_TOKEN` and
+`SF_TOKEN` **if** it has the required API permissions and belongs to the same
+synthetic org. The token field name alone does not establish its permissions.
+Verify the org with `GET https://api.<realm>.signalfx.com/v2/organization`,
+check a read endpoint such as `GET https://api.<realm>.signalfx.com/v2/metric?limit=1`,
+and verify JWT minting with the helper before using it. Send the token in the
+`X-SF-TOKEN` header; each check must return HTTP 200. A successful JWT check
+alone does not establish the read permissions required by the tools. A Splunk
+HEC token or unused judge API-key placeholder cannot replace the SF token.
+
+For a dedicated evaluation JWT cache, set `LOCAL_AUTH_JWT_CACHE_FILE` to a
+private path such as `.local/local_auth.sregym.jwt` in the Assistant env file,
+and use that same setting when minting the runner JWT. The helper otherwise
+uses `.local/local_auth.jwt`. A valid cached JWT can be reused; creating a new
+private cache path forces a fresh token check without deleting another
+workflow's cached credentials.
 
 The runner checks that it can authenticate to Assistant before injecting a
 fault, but cannot inspect which org an already-running Assistant server uses.
@@ -243,6 +291,11 @@ The image flag is omitted because the wrapper defaults to the locally built
 tag. The one-line command starts the **evaluation**, not the Assistant server
 or Kind. Changing the judge route/model creates a different campaign identity;
 use a new output directory instead of trying to resume an old direct-Azure run.
+A wrapper update can also change the fingerprint format. If startup reports
+`campaign record belongs to a different target or configuration`, preserve the
+old output folder and select a fresh `--output` for the current settings. This
+can happen even when the old folder has no raw runs. Do not edit the stored
+fingerprint to bypass the identity check.
 
 The command runs cases sequentially in separate benchmark child processes,
 one attempt each, using the svelte
