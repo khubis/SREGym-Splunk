@@ -265,6 +265,7 @@ class AssistantRequest:
     requested_reasoning: str
     action_instructions: str | None = None
     action_profile_id: str | None = None
+    incident_scope: dict[str, Any] | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
@@ -300,6 +301,8 @@ class AssistantRequest:
             result["action_instructions"] = self.action_instructions
         if self.action_profile_id is not None:
             result["action_profile_id"] = self.action_profile_id
+        if self.incident_scope is not None:
+            result["incident_scope"] = self.incident_scope
         return result
 
 
@@ -904,6 +907,7 @@ def execute_assistant_attempt(
     rendered: RenderedPrompt | None = None
     action_instructions: str | None = None
     events: tuple[AssistantEvent, ...] = ()
+    incident_scope: dict[str, Any] | None = None
     event_spool = config.artifacts_root / "assistant_v3" / "events.partial.jsonl"
     session_id: str | None = None
     retry_count = 0
@@ -921,10 +925,21 @@ def execute_assistant_attempt(
             window_ended_at,
             symptom=config.symptom,
         )
+        if config.observability_provider == "splunk":
+            # The Splunk exporter writes these exact resource identities; this
+            # structured context contains no scenario, oracle or fault content.
+            incident_scope = {
+                "environment": config.run_id,
+                "cluster": config.run_id,
+                "namespace": prompt_context["app_namespace"],
+                "start_ms": int(window_started_at.timestamp() * 1000),
+                "end_ms": int(window_ended_at.timestamp() * 1000),
+            }
         result = assistant.run_session(
             prompt=rendered.text,
             request_id=_assistant_request_id(config.run_id),
             action_instructions=action_instructions,
+            **({"incident_scope": incident_scope} if incident_scope is not None else {}),
             event_sink=lambda item: _append_event_spool(event_spool, item),
         )
         events = result.events
@@ -1050,6 +1065,7 @@ def execute_assistant_attempt(
         requested_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
         action_instructions=action_instructions,
+        incident_scope=incident_scope,
         action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
     )
     metadata = AssistantRunMetadata(
