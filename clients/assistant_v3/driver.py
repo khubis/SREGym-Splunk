@@ -928,6 +928,10 @@ def execute_assistant_attempt(
             symptom=config.symptom,
         )
         if config.observability_provider == "splunk":
+            # Conductor joins composite namespaces for prompt display. The
+            # receiver requires one literal namespace, not that display list.
+            if "," in prompt_context["app_namespace"]:
+                raise ConductorError("Structured incident scope requires one application namespace")
             # The Splunk exporter writes these exact resource identities; this
             # structured context contains no scenario, oracle or fault content.
             incident_scope = {

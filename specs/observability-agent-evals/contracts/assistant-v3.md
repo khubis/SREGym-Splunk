@@ -57,7 +57,10 @@ Splunk attempts send `incident_scope` independently from `prompt` and
 resource identities exported for the attempt; `namespace` comes from the
 Conductor application metadata. `start_ms` and `end_ms` are integer UTC epoch
 milliseconds for the saved telemetry window. These fields contain no problem
-name, fault, mechanism, oracle or grading material.
+name, fault, mechanism, oracle or grading material. The receiver currently
+accepts one literal namespace; a composite application's joined namespace
+display is rejected before Assistant dispatch and retained as a configuration
+failure. Other providers preserve their existing multi-namespace behavior.
 
 When a Logs connection is explicitly selected, `logs_source` carries its
 `connection_id` and literal `index`. The Assistant driver rejects a selected
