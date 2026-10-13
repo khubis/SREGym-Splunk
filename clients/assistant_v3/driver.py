@@ -161,6 +161,8 @@ class DriverRunConfig:
             raise ArtifactError("judge model and backend must be explicit")
         if self.readiness_report is not None and self.readiness_report.run_id != self.run_id:
             raise ArtifactError("readiness and driver identities must match")
+        if self.observability_provider == "splunk" and self.logs_connection_id is not None and not self.hec_index:
+            raise ArtifactError("A selected Logs connection requires an explicit HEC index for incident scope")
         for label, timestamp in (
             ("attempt start", self.attempt_started_at),
             ("telemetry window end", self.telemetry_window_ended_at),

@@ -48,7 +48,31 @@ X-Request-ID: <UUID derived deterministically from the anonymous run id>
 }
 ```
 
-`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. The baseline profile contains only the inclusive UTC start and end timestamps plus a direction to stay within them. The separately named symptom-guided exploratory profile appends exactly one reviewed user-observable symptom, with its independent source recorded in the public case recipe; it is not prompt-parity-comparable. Neither profile contains a run identity, namespace, canonical problem ID, mechanism, fix, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL. Assistant tools are not modified or constrained to use an internal run identity. The driver persists the exact selected profile, instructions, and rendered hash before execution, without requiring a manual preview stop for every case.
+`surface` is omitted. `action_instructions` is separate from, and does not alter, the frozen benchmark prompt. The baseline profile contains only the inclusive UTC start and end timestamps plus a direction to stay within them. The separately named symptom-guided exploratory profile appends exactly one reviewed user-observable symptom, with its independent source recorded in the public case recipe; it is not prompt-parity-comparable. Neither profile contains a run identity, namespace, canonical problem ID, mechanism, fix, oracle, grading material, HEC endpoint/token, or internal SRE Gym URL. Splunk attempts also send the caller-owned incident identity separately, as described below. The driver persists the exact selected profile, instructions, and rendered hash before execution, without requiring a manual preview stop for every case.
+
+### Structured incident scope
+
+Splunk attempts send `incident_scope` independently from `prompt` and
+`action_instructions`. Its `environment` and `cluster` are the exact opaque
+resource identities exported for the attempt; `namespace` comes from the
+Conductor application metadata. `start_ms` and `end_ms` are integer UTC epoch
+milliseconds for the saved telemetry window. These fields contain no problem
+name, fault, mechanism, oracle or grading material.
+
+When a Logs connection is explicitly selected, `logs_source` carries its
+`connection_id` and literal `index`. The Assistant driver rejects a selected
+connection without an explicit HEC index before making any Conductor or
+Assistant request; it does not silently substitute the organization default.
+When neither destination field is selected, the legacy request remains valid.
+
+This mode requires an Assistant receiver that accepts the typed
+`incident_scope` field and propagates it to root and investigator tools. The
+receiver binds environment, cluster, namespace, time and any selected Logs
+destination to source queries and rejects conflicting selectors. It does not
+grant additional data access. An older server that ignores the field does not
+satisfy this contract; HTTP success alone is not proof of applied query scope.
+The exact request and resulting native tool calls must be retained for the
+evidence audit. Other observability providers omit this field.
 
 ## Stream Handling
 
