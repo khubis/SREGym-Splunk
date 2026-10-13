@@ -112,6 +112,7 @@ class ContainerConfig:
     sregym_mcp_access: bool = True
     workspace_path: Path | None = None  # bind-mounted to /workspace for agent output
     logs_path: Path | None = None
+    assistant_source_path: Path | None = None
     sregym_apps_path: Path | None = None
     sregym_app_subdirs: list[str] | None = None
     env_vars: dict = field(default_factory=dict)
@@ -605,6 +606,12 @@ class ContainerRunner:
         if self.config.logs_path:
             self.config.logs_path.mkdir(parents=True, exist_ok=True)
             args.extend(["-v", f"{self.config.logs_path.resolve()}:/logs"])
+
+        if self.config.assistant_source_path is not None:
+            source = self.config.assistant_source_path.resolve()
+            if not source.is_dir() or not (source / "driver.py").is_file():
+                raise ValueError("Assistant driver source is unavailable; refusing cached driver fallback")
+            args.extend(["-v", f"{source}:/opt/sregym/clients/assistant_v3:ro"])
 
         # Mount only the needed SREGym-applications subdirectories (read-only)
         if self.config.sregym_apps_path and self.config.sregym_app_subdirs:

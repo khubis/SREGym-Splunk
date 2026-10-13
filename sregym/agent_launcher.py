@@ -264,6 +264,9 @@ class AgentLauncher:
         config = self._container_runner.config
         config.kubernetes_access = reg.kubernetes_access
         config.sregym_mcp_access = reg.sregym_mcp_access
+        config.assistant_source_path = (
+            Path(__file__).resolve().parents[1] / "clients" / "assistant_v3" if reg.name == "assistant_v3" else None
+        )
         config.kubeconfig_path = (
             Path(self._agent_kubeconfig_path) if reg.kubernetes_access and self._agent_kubeconfig_path else None
         )
