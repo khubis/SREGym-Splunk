@@ -935,6 +935,11 @@ def execute_assistant_attempt(
                 "start_ms": int(window_started_at.timestamp() * 1000),
                 "end_ms": int(window_ended_at.timestamp() * 1000),
             }
+            if config.logs_connection_id and config.hec_index:
+                incident_scope["logs_source"] = {
+                    "connection_id": config.logs_connection_id,
+                    "index": config.hec_index,
+                }
         result = assistant.run_session(
             prompt=rendered.text,
             request_id=_assistant_request_id(config.run_id),
