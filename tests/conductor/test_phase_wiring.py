@@ -52,6 +52,23 @@ def test_unbound_ledger_does_not_suppress_exceptions(bare):
         raise RuntimeError("boom")
 
 
+def test_failed_diagnostic_reader_cannot_mask_original_provider_failure(bare, tmp_path, caplog):
+    context = AttemptContext("anon_0123456789abcdef0123456789abcdef", "svelte", False, datetime.now(UTC))
+    bare._observability_context = context
+    bare._observability_provider = SimpleNamespace(
+        name="splunk",
+        wait_until_queryable=Mock(side_effect=ProviderError("permission", "Original provider failure")),
+        counter_observation_evidence=Mock(side_effect=RuntimeError("private diagnostic detail")),
+    )
+    bare.app = SimpleNamespace(app_name="example", namespace="example")
+    bare.bind_phase_ledger(tmp_path / "phases.jsonl")
+    with pytest.raises(ProviderError) as raised:
+        bare.wait_for_observability()
+    assert raised.value.kind == "permission"
+    assert str(raised.value) == "Original provider failure"
+    assert "private diagnostic detail" not in caplog.text
+
+
 def test_binding_stamps_problem_id_into_every_record(bare, tmp_path):
     bare.bind_phase_ledger(tmp_path / "phases.jsonl", attempt=2, agent="stratus")
     with bare._phase("deploy"):

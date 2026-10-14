@@ -208,10 +208,13 @@ class Conductor:
             return None
         assert self._observability_provider is not None
         assert self._observability_context is not None
-        self.observability_readiness = self._observability_provider.wait_until_queryable(
-            self._observability_context,
-            self._application_scope(),
-        )
+        try:
+            self.observability_readiness = self._observability_provider.wait_until_queryable(
+                self._observability_context,
+                self._application_scope(),
+            )
+        finally:
+            self._record_observability_observations()
         return self.observability_readiness
 
     def finish_observability(self) -> DeliveryReport | None:
@@ -222,11 +225,27 @@ class Conductor:
             return self.observability_delivery
         assert self._observability_provider is not None
         assert self._observability_context is not None
-        self.observability_delivery = self._observability_provider.finish_attempt(
-            self._observability_context,
-            self._application_scope(),
-        )
+        try:
+            self.observability_delivery = self._observability_provider.finish_attempt(
+                self._observability_context,
+                self._application_scope(),
+            )
+        finally:
+            self._record_observability_observations()
         return self.observability_delivery
+
+    def _record_observability_observations(self) -> None:
+        # The ledger remains available when strict readiness fails before a
+        # DeliveryReport can exist. Diagnostics must not mask that failure.
+        if getattr(self, "phases", None) is None:
+            return
+        reader = getattr(self._observability_provider, "counter_observation_evidence", None)
+        if not callable(reader):
+            return
+        try:
+            self._mark("collector_observations", "captured", **reader(self._observability_context))
+        except Exception:
+            self.logger.warning("Collector observation diagnostics could not be recorded")
 
     def start_k8s_proxy(self):
         """

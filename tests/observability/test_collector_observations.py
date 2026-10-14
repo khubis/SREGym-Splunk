@@ -1,8 +1,11 @@
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 from test_splunk import RUN_ID, SIGNALS, FakeBackend, attempt_context, prepared_provider, reliability_policy, snapshot
 
+from sregym.conductor.conductor import Conductor
 from sregym.observability.base import ApplicationScope, ProviderError, serialize_provider_artifact
 from sregym.observability.splunk import SplunkBackendError
 
@@ -131,3 +134,29 @@ def test_transient_retry_retains_both_attempts_and_existing_recovery():
     assert rows[0]["retry_after_seconds"] == 2
     assert rows[1]["outcome"] == "observed"
     assert backend.snapshot_calls == [RUN_ID] * 2
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_native_conductor_persists_strict_snapshot_failure_before_delivery_exists(tmp_path, transient):
+    backend = FakeBackend()
+    backend.snapshot_outcomes = [SplunkBackendError(status_code=503 if transient else 403, transient=transient)] * 3
+    provider = prepared_provider(backend)
+    conductor = Conductor.__new__(Conductor)
+    conductor.problem_id = "example"
+    conductor.logger = logging.getLogger("collector-observation-test")
+    conductor.app = SimpleNamespace(app_name="example", namespace="example")
+    conductor._observability_provider = provider
+    conductor._observability_context = attempt_context()
+    conductor.observability_readiness = None
+    conductor.observability_delivery = None
+    path = tmp_path / "phases_attempt1.jsonl"
+    conductor.bind_phase_ledger(path, attempt=1)
+    with pytest.raises(ProviderError) as raised:
+        conductor.wait_for_observability()
+    assert raised.value.kind == ("transient_exhausted" if transient else "permission")
+    assert conductor.observability_delivery is None
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    captured = next(row for row in rows if row["phase"] == "collector_observations")
+    assert len(captured["observations"]) == (3 if transient else 1)
+    assert all(row["outcome"] == "backend_error" for row in captured["observations"])
+    assert captured["dropped"] == 0
