@@ -990,6 +990,12 @@ class SplunkObservabilityProvider:
         if self._prepared_export is not None and self._prepared_export.run_id == context.run_id:
             return self._prepared_export
 
+        # A provider reconfigures one serial attempt at a time. Completed
+        # reports and phase ledgers own detached evidence; do not retain their
+        # potentially large diagnostic captures for the whole campaign.
+        self._reliability.clear()
+        self._counter_observations.clear()
+        self._counter_observations_dropped.clear()
         self._touched = True
         self._ensure_namespace()
         self._upsert_secret()
@@ -1519,7 +1525,7 @@ class SplunkObservabilityProvider:
         return _unavailable_snapshot()
 
     def counter_observation_evidence(self, context: AttemptContext) -> dict[str, Any]:
-        """Bounded, payload-free diagnostics, including failures before delivery exists."""
+        """Current-attempt diagnostics; saved reports/ledgers retain completed evidence."""
         return {
             "observations": copy.deepcopy(self._counter_observations.get(context.run_id, [])),
             "dropped": self._counter_observations_dropped.get(context.run_id, 0),
