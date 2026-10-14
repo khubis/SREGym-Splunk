@@ -974,6 +974,9 @@ def execute_assistant_attempt(
                     "connection_id": connection_id,
                     "index": config.hec_index,
                 }
+        # Selector enforcement belongs to the compatible receiver required by
+        # the session contract. Retain the request and native calls for audit;
+        # a completed stream alone is not a scope-capability acknowledgement.
         result = assistant.run_session(
             prompt=rendered.text,
             request_id=_assistant_request_id(config.run_id),
