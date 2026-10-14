@@ -741,6 +741,8 @@ def _delivery_payload(delivery: DeliveryReport) -> dict[str, Any]:
         payload.pop("queue_drain_minimum")
     if delivery.counter_samples is None:
         payload.pop("counter_samples")
+    if delivery.counter_observations is None:
+        payload.pop("counter_observations")
     return payload
 
 

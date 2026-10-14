@@ -1,6 +1,8 @@
 """Secure deployment of the Splunk OpenTelemetry Collector."""
 
+import copy
 import json
+import math
 import os
 import random
 import re
@@ -39,6 +41,7 @@ RELEASE_NAME = "sregym-splunk-otel"
 NAMESPACE = "sregym-observability"
 SECRET_NAME = "sregym-splunk-otel-credentials"
 _HELM_TIMEOUT = "5m"
+_COUNTER_OBSERVATION_LIMIT = 256
 _SIGNALFLOW_RESOLUTION_MS = 60_000
 SIGNALFLOW_INGESTION_LAG = timedelta(minutes=2)
 _COLLECTOR_WORKLOADS = (
@@ -964,6 +967,8 @@ class SplunkObservabilityProvider:
         self._prepared_export: ExternalOtlpExport | None = None
         self._connection_id: str | None = None
         self._reliability: dict[str, _AttemptReliabilityState] = {}
+        self._counter_observations: dict[str, list[dict[str, Any]]] = {}
+        self._counter_observations_dropped: dict[str, int] = {}
         self._touched = False
         self._closed = False
 
@@ -1117,14 +1122,24 @@ class SplunkObservabilityProvider:
         drain_started = self._monotonic()
         for attempt in range(self._policy.max_attempts):
             if not drained:
+                minimum_at = self._now()
+                observed_at = time.monotonic()
                 try:
                     minimum = self._query_backend().collector_queue_minimum(
-                        context, drain_since, self._now(), self._policy.request_timeout_seconds
+                        context, drain_since, minimum_at, self._policy.request_timeout_seconds
                     )
                 except SplunkBackendError as error:
+                    self._record_counter_observation(
+                        context, "collector_queue_minimum", minimum_at, observed_at, attempt + 1,
+                        strict=False, error=error,
+                    )
                     if not error.transient:
                         break
                 else:
+                    self._record_counter_observation(
+                        context, "collector_queue_minimum", minimum_at, observed_at, attempt + 1,
+                        strict=False, counters={"queue_size": minimum},
+                    )
                     if any(value is not None for value in minimum.values()):
                         drain_minimum = minimum
                     if self._queues_drained(minimum):
@@ -1255,6 +1270,7 @@ class SplunkObservabilityProvider:
                 "terminal_initial": _counter_evidence(terminal_initial),
                 "terminal": _counter_evidence(final_snapshot),
             },
+            counter_observations=self.counter_observation_evidence(context),
         )
         return state.delivery
 
@@ -1456,11 +1472,22 @@ class SplunkObservabilityProvider:
         limit = attempts or self._policy.max_attempts
         started = self._monotonic()
         for attempt in range(limit):
+            sample_at = checked_at or self._now()
+            observed_at = time.monotonic()
             try:
-                return self._query_backend().collector_snapshot(
-                    context, checked_at or self._now(), self._policy.request_timeout_seconds
+                sample = self._query_backend().collector_snapshot(
+                    context, sample_at, self._policy.request_timeout_seconds
                 )
             except SplunkBackendError as error:
+                self._record_counter_observation(
+                    context,
+                    "collector_snapshot",
+                    sample_at,
+                    observed_at,
+                    attempt + 1,
+                    strict=strict,
+                    error=error,
+                )
                 if not error.transient:
                     if strict:
                         self._raise_backend_error(error, None)
@@ -1476,9 +1503,73 @@ class SplunkObservabilityProvider:
                     self._policy.readiness_timeout_seconds,
                 ):
                     break
+            else:
+                self._record_counter_observation(
+                    context,
+                    "collector_snapshot",
+                    sample_at,
+                    observed_at,
+                    attempt + 1,
+                    strict=strict,
+                    counters=_counter_evidence(sample),
+                )
+                return sample
         if strict:
             raise ProviderError("transient_exhausted", "Splunk collector metric retries were exhausted")
         return _unavailable_snapshot()
+
+    def counter_observation_evidence(self, context: AttemptContext) -> dict[str, Any]:
+        """Bounded, payload-free diagnostics, including failures before delivery exists."""
+        return {
+            "observations": copy.deepcopy(self._counter_observations.get(context.run_id, [])),
+            "dropped": self._counter_observations_dropped.get(context.run_id, 0),
+        }
+
+    def _record_counter_observation(
+        self,
+        context: AttemptContext,
+        operation: str,
+        checked_at: datetime,
+        started: float,
+        attempt: int,
+        *,
+        strict: bool,
+        counters: dict[str, dict[SignalName, int | None]] | None = None,
+        error: SplunkBackendError | None = None,
+    ) -> None:
+        observations = self._counter_observations.setdefault(context.run_id, [])
+        if len(observations) >= _COUNTER_OBSERVATION_LIMIT:
+            self._counter_observations_dropped[context.run_id] = (
+                self._counter_observations_dropped.get(context.run_id, 0) + 1
+            )
+            return
+        row: dict[str, Any] = {
+            "operation": operation,
+            "attempt": attempt,
+            "strict": strict,
+            "checked_at": checked_at,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            "outcome": "backend_error" if error is not None else "observed",
+        }
+        if counters is not None:
+            row["counters"] = {
+                name: {
+                    signal: values.get(signal) if type(values.get(signal)) is int else None for signal in SIGNAL_NAMES
+                }
+                for name, values in counters.items()
+            }
+        if error is not None:
+            status = error.status_code
+            retry = error.retry_after_seconds
+            row.update(
+                status_code=status if type(status) is int and 100 <= status <= 599 else None,
+                transient=bool(error.transient),
+                retry_after_seconds=(
+                    retry if type(retry) in (int, float) and math.isfinite(retry) and 0 <= retry <= 3600 else None
+                ),
+            )
+        # Never copy exception text, response bodies, request headers or credentials.
+        observations.append(row)
 
     def _backoff(self, attempt: int, retry_after: float | None) -> float:
         base = min(
