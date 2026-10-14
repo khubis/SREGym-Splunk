@@ -98,6 +98,7 @@ class DriverRunConfig:
     attempt_started_at: datetime | None = None
     telemetry_window_ended_at: datetime | None = None
     symptom: str | None = None
+    resolved_logs_connection_id: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -109,6 +110,15 @@ class DriverRunConfig:
             raise ArtifactError("Assistant driver configuration must be an object")
         readiness_value = payload.get("readiness_report")
         readiness_report = _readiness_from_dict(readiness_value) if readiness_value is not None else None
+        # Older producers stored the resolved ID without preserving whether it
+        # was configured. Keep that routing observation, not a selection claim.
+        has_selection_provenance = "resolved_logs_connection_id" in payload
+        selected_connection = payload.get("logs_connection_id") if has_selection_provenance else None
+        resolved_connection = (
+            payload.get("resolved_logs_connection_id")
+            if has_selection_provenance
+            else payload.get("logs_connection_id")
+        )
         try:
             config = cls(
                 run_id=payload["run_id"],
@@ -123,7 +133,8 @@ class DriverRunConfig:
                 agent_version=payload.get("agent_version"),
                 observability_chart_version=payload.get("observability_chart_version"),
                 hec_index=payload.get("hec_index"),
-                logs_connection_id=payload.get("logs_connection_id"),
+                logs_connection_id=selected_connection,
+                resolved_logs_connection_id=resolved_connection,
                 attempt_started_at=(
                     datetime.fromisoformat(payload["attempt_started_at"].replace("Z", "+00:00"))
                     if isinstance(payload.get("attempt_started_at"), str)
@@ -163,6 +174,20 @@ class DriverRunConfig:
             raise ArtifactError("readiness and driver identities must match")
         if self.observability_provider == "splunk" and self.logs_connection_id is not None and not self.hec_index:
             raise ArtifactError("A selected Logs connection requires an explicit HEC index for incident scope")
+        for label, connection in (
+            ("selected", self.logs_connection_id),
+            ("resolved", self.resolved_logs_connection_id),
+        ):
+            if connection is not None and (
+                not isinstance(connection, str) or not connection.strip() or connection != connection.strip()
+            ):
+                raise ArtifactError(f"{label} Logs connection must be a non-empty ID")
+        if (
+            self.logs_connection_id is not None
+            and self.resolved_logs_connection_id is not None
+            and self.logs_connection_id != self.resolved_logs_connection_id
+        ):
+            raise ArtifactError("resolved Logs connection must match the selected Logs connection")
         for label, timestamp in (
             ("attempt start", self.attempt_started_at),
             ("telemetry window end", self.telemetry_window_ended_at),
@@ -943,9 +968,10 @@ def execute_assistant_attempt(
                 "start_ms": int(window_started_at.timestamp() * 1000),
                 "end_ms": int(window_ended_at.timestamp() * 1000),
             }
-            if config.logs_connection_id and config.hec_index:
+            connection_id = config.resolved_logs_connection_id or config.logs_connection_id
+            if connection_id and config.hec_index:
                 incident_scope["logs_source"] = {
-                    "connection_id": config.logs_connection_id,
+                    "connection_id": connection_id,
                     "index": config.hec_index,
                 }
         result = assistant.run_session(
@@ -1099,7 +1125,7 @@ def execute_assistant_attempt(
         observability_provider=config.observability_provider,
         observability_chart_version=config.observability_chart_version,
         hec_index=config.hec_index,
-        logs_connection_id=config.logs_connection_id,
+        logs_connection_id=config.resolved_logs_connection_id or config.logs_connection_id,
         readiness_report=config.readiness_report,
         attempt_started_at=config.attempt_started_at or started_at,
         agent_started_at=started_at,
@@ -1192,7 +1218,7 @@ def write_pre_agent_failure(
         observability_provider=config.observability_provider,
         observability_chart_version=config.observability_chart_version,
         hec_index=config.hec_index,
-        logs_connection_id=config.logs_connection_id,
+        logs_connection_id=config.resolved_logs_connection_id or config.logs_connection_id,
         readiness_report=config.readiness_report,
         attempt_started_at=config.attempt_started_at or timestamp,
         agent_started_at=None,
