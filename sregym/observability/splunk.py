@@ -1662,10 +1662,40 @@ class SplunkObservabilityProvider:
     ) -> None:
         try:
             result = self._run(command, stdin)
-        except Exception:
-            raise ProviderError(failure_kind, safe_message) from None
+        except Exception as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                reason = "command_timeout"
+            elif isinstance(error, FileNotFoundError):
+                reason = "executable_unavailable"
+            else:
+                reason = "command_exception"
+            raise ProviderError(failure_kind, f"{safe_message} (reason={reason})") from None
         if result.returncode != 0:
-            raise ProviderError(failure_kind, safe_message) from None
+            # Preserve actionable failure categories in the ordinary exception
+            # and phase ledger. Helm/kubectl output can contain arbitrary server
+            # payloads and credentials: never persist it or try to redact it.
+            reason = _command_failure_reason(result.stdout, result.stderr)
+            code = result.returncode if type(result.returncode) is int else "unknown"
+            raise ProviderError(failure_kind, f"{safe_message} (exit_code={code}; reason={reason})") from None
+
+
+def _command_failure_reason(stdout: str | None, stderr: str | None) -> str:
+    # Bound both inspection work and the output vocabulary. These classifications
+    # describe the command failure; they do not prove its underlying cause.
+    text = "\n".join(value[:32768].lower() for value in (stderr, stdout) if isinstance(value, str))
+    for reason, markers in (
+        ("operation_in_progress", ("another operation (install/upgrade/rollback) is in progress",)),
+        ("permission_denied", ("forbidden", "permission denied")),
+        ("authentication", ("unauthorized", "must be logged in")),
+        ("tls_verification", ("x509:", "certificate verify failed")),
+        ("connection_refused", ("connection refused",)),
+        ("name_resolution", ("no such host", "temporary failure in name resolution")),
+        ("deadline_exceeded", ("context deadline exceeded", "timed out waiting", "i/o timeout")),
+        ("chart_unavailable", ("failed to download", "chart not found", "invalid chart")),
+    ):
+        if any(marker in text for marker in markers):
+            return reason
+    return "unclassified"
 
 
 def _run_command(command: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:

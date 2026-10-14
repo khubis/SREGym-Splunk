@@ -512,3 +512,19 @@ non-live. If a case reports `cleanup_timeout_after_agent_exit`, its provisional
 judge score is excluded; inspect and reconcile only that case's task-owned
 cluster resources, then rerun the same campaign command after the underlying
 cleanup fault is fixed. The original incomplete attempt remains in its raw batch.
+
+Delivery auditing (including workload quiescing) and destructive cleanup each
+have an independent 300-second watchdog. The cleanup budget starts when fault
+recovery, undeploy and baseline reconciliation begin, so a slow delivery audit
+does not consume it. Both deadlines use the worker's monotonic phase start;
+waiting again does not renew a phase's budget. An expired phase still aborts the
+campaign and prevents the next attempt from overlapping abandoned work.
+
+Collector command failures retain an exit code and an allowlisted reason, such
+as `deadline_exceeded`, `permission_denied` or `tls_verification`, in the existing
+error and phase ledger. Raw Helm/kubectl output is deliberately omitted because
+it can contain credentials or arbitrary server payloads. An unrecognized error
+is recorded as `unclassified`; the category is evidence about the failed
+command, not proof of its underlying cause. Bounded collector snapshot/request
+observations remain available in delivery artifacts and phase ledgers; a missing
+sample continues to invalidate delivery.
