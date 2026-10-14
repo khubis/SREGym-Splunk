@@ -310,3 +310,51 @@ def test_final_submission_worker_retains_failed_phase_timeout_and_evaluator_erro
         assert conductor._submit_future is None
 
     asyncio.run(run())
+
+
+def test_worker_completion_between_snapshot_and_wait_preserves_error_and_timeout(monkeypatch):
+    clock = [0.0]
+    delivery_entered = threading.Event()
+    release_delivery = threading.Event()
+    completed = threading.Event()
+
+    def delivery():
+        delivery_entered.set()
+        release_delivery.wait(2)
+        clock[0] = 2.0
+        raise SystemExit("delivery failed after its deadline")
+
+    conductor = _teardown(delivery, lambda: None)
+    monkeypatch.setattr(conductor_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    original_lock = conductor._submission_lock
+    waiter_thread = threading.current_thread()
+    handoff = [False]
+
+    class HandoffLock:
+        def __enter__(self):
+            return original_lock.__enter__()
+
+        def __exit__(self, *args):
+            original_lock.__exit__(*args)
+            if threading.current_thread() is waiter_thread and handoff[0]:
+                handoff[0] = False
+                release_delivery.set()
+                assert completed.wait(1)
+
+    async def run():
+        future = conductor.finish_problem_in_background()
+        future.add_done_callback(lambda _: completed.set())
+        try:
+            assert delivery_entered.wait(1)
+            conductor._submission_lock = HandoffLock()
+            handoff[0] = True
+            with pytest.raises(RuntimeError, match="Cleanup terminated with SystemExit"):
+                await conductor.wait_for_submission_work(timeout=1)
+            assert conductor.results["teardown_timed_out"] is True
+            assert conductor.results["teardown_timeout_phase"] == "delivery"
+            assert conductor._submit_future is None
+        finally:
+            release_delivery.set()
+            assert isinstance(future.exception(timeout=2), RuntimeError)
+
+    asyncio.run(run())

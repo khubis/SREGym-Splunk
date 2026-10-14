@@ -1287,9 +1287,14 @@ class Conductor:
             with self._submission_lock:
                 future = self._submit_future
                 pending = bool(self._pending_submission_stages)
+                future_finished = future is not None and future.done()
                 phases = tuple(
                     phase for phase in getattr(self, "_teardown_phases", []) if phase[0] == self._submission_generation
                 )
+                # Decide from one observation. Completion after releasing this
+                # lock must be reconsidered with its matching phase history,
+                # rather than consuming an error against an older snapshot.
+                observed_at = time.monotonic()
             if timeout is not None and phases:
                 # The first wait can occur after delivery, or even after the
                 # whole worker completes. Preserve completed durations so a
@@ -1302,7 +1307,7 @@ class Conductor:
                         # a completed worker failure. Consume that error before
                         # the caller's timeout recovery can abandon the future;
                         # the timeout metadata above still records both facts.
-                        if future is not None and future.done():
+                        if future is not None and future_finished:
                             try:
                                 future.result()
                             finally:
@@ -1314,8 +1319,8 @@ class Conductor:
                     deadline = phases[-1][2] + timeout
 
             if future is not None:
-                if deadline is not None and not future.done():
-                    remaining = deadline - time.monotonic()
+                if deadline is not None and not future_finished:
+                    remaining = deadline - observed_at
                     if remaining <= 0:
                         if phases:
                             self.results["teardown_timeout_phase"] = phases[-1][1]
@@ -1327,7 +1332,7 @@ class Conductor:
                     await asyncio.sleep(min(0.05, remaining))
                     continue
                 try:
-                    if future.done():
+                    if future_finished:
                         future.result()
                     else:
                         await asyncio.shield(asyncio.wrap_future(future))
@@ -1339,7 +1344,7 @@ class Conductor:
                 continue
 
             if pending:
-                if deadline is not None and time.monotonic() >= deadline:
+                if deadline is not None and observed_at >= deadline:
                     raise TimeoutError
                 await asyncio.sleep(0.05)
                 continue
