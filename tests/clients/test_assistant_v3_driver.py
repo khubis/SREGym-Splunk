@@ -1191,6 +1191,16 @@ def test_closing_delivery_audit_saves_counter_samples_for_review(tmp_path: Path)
     assert saved["valid"] is True
 
 
+def test_closing_delivery_audit_retains_bounded_counter_observations(tmp_path: Path) -> None:
+    AssistantArtifactStore(tmp_path).write(completed_bundle(delivery=None, cleanup_status="pending"))
+    evidence = {"observations": [{"operation": "collector_snapshot", "outcome": "backend_error", "status_code": 503}], "dropped": 0}
+    delivery = replace(invalid_delivery(), counter_observations=evidence)
+    finalize_attempt_artifacts(tmp_path, delivery=delivery, cleanup_status="completed")
+    saved = json.loads((tmp_path / "observability" / "delivery.json").read_text())
+    assert saved["counter_observations"] == evidence
+    assert saved["valid"] is False
+
+
 def test_driver_config_file_round_trip_preserves_readiness_and_attempt_start(tmp_path: Path) -> None:
     payload = {
         "run_id": RUN_ID,

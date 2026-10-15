@@ -95,6 +95,7 @@ class DeliveryReport:
     valid: bool
     queue_drain_minimum: dict[SignalName, int | None] | None = None
     counter_samples: dict[str, dict[str, dict[SignalName, int | None]]] | None = None
+    counter_observations: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
@@ -214,6 +215,8 @@ def serialize_provider_artifact(value: ProviderArtifact) -> dict[str, Any]:
     payload = _json_safe(asdict(value))
     if isinstance(value, DeliveryReport) and value.counter_samples is None:
         payload.pop("counter_samples")
+    if isinstance(value, DeliveryReport) and value.counter_observations is None:
+        payload.pop("counter_observations")
     return payload
 
 
