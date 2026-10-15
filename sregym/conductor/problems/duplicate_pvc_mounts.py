@@ -10,6 +10,12 @@ from sregym.utils.decorators import mark_fault_injected
 
 
 class DuplicatePVCMounts(Problem):
+    """Model duplicate PVC mounts across applications.
+
+    The ``duplicate_pvc_mounts_astronomy_shop`` configuration is deprecated in
+    SREGym 1.1 after reaching 100% overall pass@3.
+    """
+
     @property
     def preserve_app_local_jaeger_deployment(self) -> bool:
         """Keep the exact workload the PVC fault will mutate when it is Jaeger."""
@@ -40,7 +46,17 @@ class DuplicatePVCMounts(Problem):
             ),
         )
         self.diagnosis_oracle = LLMAsAJudgeOracle(problem=self, expected=self.root_cause)
-        self.mitigation_oracle = DuplicatePVCMountsMitigationOracle(problem=self)
+        if self.faulty_service == "frontend":
+            self.mitigation_oracle = DuplicatePVCMountsMitigationOracle(
+                problem=self,
+                query_port=app.frontend_port,
+                query_path="/",
+                expected_content="Otel Demo - Home"
+                if self.app_name == "astronomy_shop"
+                else "Go Microservices Example",
+            )
+        else:
+            self.mitigation_oracle = DuplicatePVCMountsMitigationOracle(problem=self)
 
         self.app.create_workload()
 

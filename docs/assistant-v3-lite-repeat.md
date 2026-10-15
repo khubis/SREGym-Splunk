@@ -1,3 +1,5 @@
+> Current upstream SREGym 1.1 Lite contains 17 active cases. The earlier 21-case results and retired prompt recipes are historical evidence; current runs use the upstream registry. Model and judge settings are unchanged.
+
 # Run Assistant V3 against Splunk with SREGym-Lite
 
 This fork's wrapper runs one or all 21 Lite cases sequentially: inject a fault,
@@ -135,13 +137,18 @@ memory gateway opt-in or custom embedding-routing branch is needed.
 
 If you need the separate repository, clone
 `https://cd.splunkdev.com/observability/ai/assistant.git` using your authorized
-GitLab credentials. If SSH access is unavailable, use the HTTPS credential
-helper (authenticate with `dev-login gitlab` first if needed):
+GitLab credentials. Authenticate with `dev-login gitlab` if needed. Preserve
+local edits before switching branches.
+
+After selecting a current main checkout, sync that checkout's locked dependencies:
 
 ```bash
-git -c credential.helper='!glab auth git-credential' clone \
-  https://cd.splunkdev.com/observability/ai/assistant.git
+dev-login artifactory >/dev/null
+uv sync --locked
 ```
+
+Keep the two repositories' virtual environments separate; their Python
+requirements differ. The Assistant commands use its own `uv` environment.
 
 Chat and memory now share the V3 gateway selector and URL; their model choices
 remain separate:
@@ -160,14 +167,13 @@ callers. Org/service headers are attribution, not a security boundary.
 Use a **fresh dedicated memory database** for the default small-model vectors.
 If migrating from our earlier template, remove its embedding-model and routing
 overrides from your private env file and use the new small-memory database name.
-Do not reuse an index containing large-model (3072-dimensional) vectors with the
-default small model (1536 dimensions); it needs rebuilding or a fresh database.
+Do not reuse an index containing large-model (3072-dimensional) vectors with
+the default small model (1536 dimensions); it needs rebuilding or a fresh database.
 `AIMEMORY_DB_NAME` and
 `MEMORY_PG_DATABASE` must match; the V3 Make target exports the former as the
-latter. The V3 memory routing change does not change the separate legacy
-documentation-search embedding path. The template also gives DeepEval an explicit
-read-only cache location, avoiding a startup error caused by an empty generated
-cache path.
+latter. The V3 memory routing change does not change the separate legacy documentation-search
+embedding path. The template also gives DeepEval an explicit read-only cache
+location, avoiding a startup error caused by an empty generated cache path.
 
 Do not set `ASSISTANT_V3_OPENAI_BASE_URL` when gateway mode is enabled; V3
 rejects that combination. The Assistant server derives its own gateway

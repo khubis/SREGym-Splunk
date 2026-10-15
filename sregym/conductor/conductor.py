@@ -50,10 +50,8 @@ from sregym.profile import is_svelte
 from sregym.service.apps.app_registry import AppRegistry
 from sregym.service.cluster_egress import ClusterEgressBoundary
 from sregym.service.cluster_state import ClusterStateManager
-from sregym.service.dm_flakey_manager import DmFlakeyManager
 from sregym.service.internet_policy import InternetPolicy
 from sregym.service.k8s_proxy import KubernetesAPIProxy
-from sregym.service.khaos import KhaosController
 from sregym.service.kubectl import KubeCtl
 from sregym.service.mcp_server import MCPServer
 from sregym.service.rollout import deployment_rollout_complete
@@ -80,6 +78,7 @@ class ConductorConfig:
     # supports, which is what an unset --stages leaves in place.
     stages: tuple[str, ...] | None = None
     baseline_override_s: int | None = None  # overrides per-problem baseline_duration_s when set
+    propagation_override_s: int | None = None  # overrides per-problem propagation_duration_s when set
 
     @property
     def restrict_network_access(self) -> bool:
@@ -103,15 +102,12 @@ class Conductor:
         self.apps = AppRegistry()
         self.agent_name = None
 
-        self.khaos = KhaosController(self.kubectl)
-        self.dm_flakey_manager = DmFlakeyManager(self.kubectl)
         self.cluster_state = ClusterStateManager(self.kubectl)
         self.cluster_egress = ClusterEgressBoundary(self.kubectl)
         self._baseline_captured = False
 
         # Kubernetes API proxy to hide chaos engineering namespaces and load generators from agents
         self.k8s_proxy = KubernetesAPIProxy(
-            hidden_namespaces={"chaos-mesh", "khaos"},
             listen_port=self.config.k8s_proxy_listen_port,
             listen_host=self.config.k8s_proxy_listen_host,
             restrict_network_access=self.config.restrict_network_access,
@@ -123,6 +119,8 @@ class Conductor:
         self.app = None
         self.detection_oracle = None
         self.execution_start_time: float = 0.0
+        self.agent_timeout_seconds: float | None = None
+        self.agent_deadline_monotonic: float | None = None
 
         # grading flow state
         # submission_stage reflects the current stage (e.g., "diagnosis", "mitigation") or "done"
@@ -503,7 +501,7 @@ class Conductor:
         ledger = getattr(self, "phases", None)
         return ledger is not None and ledger.is_open(name)
 
-    def _advance_to_next_stage(self, start_index: int = 0):
+    async def _advance_to_next_stage(self, start_index: int = 0):
         """
         Advance to the next stage starting from start_index.
         If there are more stages, set up for agent submission.
@@ -517,10 +515,22 @@ class Conductor:
             self.finish_problem_in_background()
             return
 
-        # Inject fault before the first stage if not already done
+        # Inject the fault once before the first stage.
         if start_index == 0 and not self.fault_injected:
             with self._phase("inject_fault"):
                 self._inject_fault()
+
+            # Let the fault surface in telemetry before the agent sees it.
+            propagation = (
+                self.config.propagation_override_s
+                if self.config.propagation_override_s is not None
+                else self.problem.propagation_duration_s
+            )
+            if propagation > 0:
+                self.logger.info(f"[PROPAGATION] Waiting {propagation}s for the fault to reach telemetry...")
+                with self._phase("propagation", seconds=propagation):
+                    await asyncio.sleep(propagation)
+                self.logger.info("[PROPAGATION] Propagation window complete.")
 
         if start_index < len(self.stage_sequence):
             stage = self.stage_sequence[start_index]
@@ -587,12 +597,8 @@ class Conductor:
 
         # Stop noises
         if self.config.enable_noise:
-            try:
-                nm = get_noise_manager()
-                nm.stop()
-                self.logger.info("[CLEANUP] NoiseManager stopped")
-            except Exception as e:
-                self.logger.warning(f"Failed to stop NoiseManager: {e}")
+            get_noise_manager().stop()
+            self.logger.info("[CLEANUP] NoiseManager stopped")
 
         if stop_late_cleanup():
             return
@@ -804,7 +810,7 @@ class Conductor:
         2) Initialize Act registry and execute initial GymActs and first AgentAct precondition
 
         Returns:
-            StartProblemResult: Result status indicating success or skip reason
+            StartProblemResult.SUCCESS once the problem is running; failures raise.
         """
         if self.problem_id is None:
             raise RuntimeError("Cannot start problem: problem_id is not set")
@@ -839,6 +845,8 @@ class Conductor:
             self.problem = None
             self.app = None
             self.results = {}
+            self.agent_timeout_seconds = None
+            self.agent_deadline_monotonic = None
             self.incident_started_at = None
             self.incident_ended_at = None
 
@@ -852,14 +860,6 @@ class Conductor:
 
         self.logger.info(f"[Session Start] Problem ID: {self.problem_id}")
         self.logger.info(f"[STAGE] Start testing on problem: {self.problem_id}")
-
-        if self.problem.requires_khaos() and self.kubectl.is_emulated_cluster():
-            self.logger.warning(
-                f"Problem '{self.problem_id}' requires Khaos for eBPF-based fault injection, "
-                "but Khaos cannot be deployed on emulated clusters (kind, minikube, k3d, etc.). "
-                "Skipping this problem."
-            )
-            return StartProblemResult.SKIPPED_KHAOS_REQUIRED
 
         with self._phase("fix_kubernetes"):
             self.fix_kubernetes()
@@ -909,7 +909,7 @@ class Conductor:
         self.incident_started_at = datetime.now(UTC)
 
         # After deployment, advance to the first stage
-        self._advance_to_next_stage(start_index=0)
+        await self._advance_to_next_stage(start_index=0)
 
         if self._observability_enabled():
             with self._phase("observability_readiness"):
@@ -935,12 +935,8 @@ class Conductor:
 
         # Stop noise before evaluation to ensure clean environment
         if self.config.enable_noise:
-            try:
-                nm = get_noise_manager()
-                self.logger.info("Stopping noise manager before evaluation...")
-                nm.stop()
-            except Exception as e:
-                self.logger.warning(f"Failed to stop noise manager: {e}")
+            self.logger.info("Stopping noise manager before evaluation...")
+            get_noise_manager().stop()
 
         # The agent's time on this stage ends when a submission arrives to be
         # evaluated; grading time is its own phase, not the agent's.
@@ -1576,12 +1572,6 @@ class Conductor:
         except Exception as e:
             self.logger.error(f"Failed to recover CoreDNS NXDOMAIN templates: {e}")
 
-        self.logger.info("[FIX] Leftover dm-flakey infrastructure if any")
-        try:
-            self.dm_flakey_manager.teardown_openebs_dm_flakey_infrastructure()
-        except Exception as e:
-            self.logger.warning(f"Could not teardown dm-flakey (Khaos may not be deployed yet): {e}")
-
         self.logger.info("[FIX] NightlyRebalanceOOM kube-system actor leftover if any")
         try:
             from sregym.conductor.problems.nightly_rebalance_oom import NightlyRebalanceOOM
@@ -1647,11 +1637,6 @@ class Conductor:
         self.kubectl.wait_for_ready("kube-system")
         self._wait_for_infrastructure_ready("metrics-server", self._metrics_server_configured)
 
-        # Only deploy Khaos if the problem requires it
-        if problem.requires_khaos():
-            self.logger.info("[DEPLOY] Deploying Khaos DaemonSet...")
-            self.khaos.ensure_deployed()
-
         self.logger.info("[DEPLOY] Setting up OpenEBS…")
         svelte = is_svelte()
         # `openebs` is protected from reconciliation, so it persists across
@@ -1708,7 +1693,7 @@ class Conductor:
         self.logger.info("[DEPLOY] Deploying MCP server…")
         self.mcp_server.deploy()
 
-        self.logger.info("[ENV] Set up necessary components: metrics-server, Khaos, OpenEBS, Prometheus, Jaeger, Loki")
+        self.logger.info("[ENV] Set up necessary components: metrics-server, OpenEBS, Prometheus, Jaeger, Loki")
 
         # train-ticket pods need jaeger at startup; create ExternalName before deploy.
         # Other apps get it after deploy to avoid Helm ownership conflicts.

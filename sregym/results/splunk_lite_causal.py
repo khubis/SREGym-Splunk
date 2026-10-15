@@ -27,9 +27,16 @@ class CausalSourceError(RuntimeError):
 class CaseGateError(RuntimeError):
     """A required pre-agent evidence check did not become trustworthy."""
 
-    def __init__(self, reason: str, proof: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        proof: dict[str, Any] | None = None,
+        *,
+        attempt_diagnostics: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(reason)
         self.proof = proof
+        self.attempt_diagnostics = attempt_diagnostics
 
 
 def read_source_pods(
@@ -2657,22 +2664,59 @@ def _wait_for_pre_agent(
         raise ValueError("pre-agent retry policy must be positive")
     deadline = monotonic() + max_wait_seconds
     last_proof: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] = {"attempt_count": 0, "observations": [], "dropped": 0}
     for index in range(attempts):
         remaining = deadline - monotonic()
         if remaining <= 0:
             break
         end = now()
+        timeout = min(request_timeout_seconds, max(0.1, remaining / 3))
+        observed_at = time.monotonic()
+        row: dict[str, Any] = {"attempt": index + 1, "request_timeout_seconds": timeout}
+        fatal_reason: str | None = None
         try:
-            last_proof = verify_once(end, min(request_timeout_seconds, max(0.1, remaining / 3)))
+            last_proof = verify_once(end, timeout)
         except SplunkBackendError as error:
             if not error.transient:
-                reason = "Splunk authentication or query permission failed" if error.status_code in {401, 403} else "Splunk query rejected"
-                raise CaseGateError(reason) from None
+                fatal_reason = (
+                    "Splunk authentication or query permission failed"
+                    if error.status_code in {401, 403}
+                    else "Splunk query rejected"
+                )
             last_proof = {"status": "query_error", "schema": "sregym.splunk_lite_pre_agent.v1"}
+            row["transient"] = error.transient
+            if error.diagnostic:
+                row["backend"] = error.diagnostic
             if error.status_code is not None:
                 last_proof["http_status"] = error.status_code
+                row["http_status"] = error.status_code
         except CausalSourceError:
             last_proof = {"status": "source_query_error", "schema": "sregym.splunk_lite_pre_agent.v1"}
+        status = last_proof.get("status")
+        row["status"] = (
+            status
+            if status
+            in {
+                "ready",
+                "ready_data_limited",
+                "not_ready",
+                "pending",
+                "not_visible",
+                "query_error",
+                "source_query_error",
+            }
+            else "evidence_not_ready"
+        )
+        row["elapsed_ms"] = round(max(0.0, time.monotonic() - observed_at) * 1000, 3)
+        diagnostics["attempt_count"] += 1
+        if len(diagnostics["observations"]) == 60:
+            # Keep the first outcome and the most recent 59; never erase the
+            # initial failure when the final request has a shorter deadline.
+            diagnostics["observations"].pop(1)
+            diagnostics["dropped"] += 1
+        diagnostics["observations"].append(row)
+        if fatal_reason:
+            raise CaseGateError(fatal_reason, attempt_diagnostics=diagnostics) from None
         if last_proof.get("status") in {"ready", "ready_data_limited"}:
             return last_proof
         if index < attempts - 1:
@@ -2680,4 +2724,4 @@ def _wait_for_pre_agent(
             if remaining <= 0:
                 break
             sleep(min(interval_seconds, remaining))
-    raise CaseGateError("pre-agent evidence did not become ready", last_proof)
+    raise CaseGateError("pre-agent evidence did not become ready", last_proof, attempt_diagnostics=diagnostics)

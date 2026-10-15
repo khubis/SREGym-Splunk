@@ -267,8 +267,6 @@ def test_conductor_initializes_observability_state(monkeypatch):
     ):
         monkeypatch.setattr(conductor_mod, name, Mock(return_value=SimpleNamespace()))
     monkeypatch.setattr(conductor_mod, "MCPServer", Mock(return_value=SimpleNamespace()))
-    monkeypatch.setattr(conductor_mod, "KhaosController", Mock(return_value=SimpleNamespace()))
-    monkeypatch.setattr(conductor_mod, "DmFlakeyManager", Mock(return_value=SimpleNamespace()))
     monkeypatch.setattr(conductor_mod, "ClusterStateManager", Mock(return_value=SimpleNamespace()))
 
     conductor = Conductor()
@@ -366,7 +364,8 @@ def test_splunk_delivery_quiesces_workload_before_collector_drain(bare):
         attempt_started_at=datetime.now(UTC),
     )
     bare.app = SimpleNamespace(
-        app_name="Hotel Reservation", namespace="hotel-reservation",
+        app_name="Hotel Reservation",
+        namespace="hotel-reservation",
         stop_workload=lambda: events.append("quiesce"),
     )
     bare.bind_observability_attempt(provider, context)
@@ -389,7 +388,8 @@ def test_splunk_delivery_quiesces_problem_owned_workload_before_collector_drain(
         attempt_started_at=datetime.now(UTC),
     )
     bare.app = SimpleNamespace(
-        app_name="Hotel Reservation", namespace="hotel-reservation",
+        app_name="Hotel Reservation",
+        namespace="hotel-reservation",
         stop_workload=lambda: events.append("stop_app_default_workload"),
     )
     bare.problem = SimpleNamespace(stop_workload=lambda: events.append("stop_problem_workload"))
@@ -524,7 +524,7 @@ def test_start_problem_places_provider_prepare_before_baseline_and_readiness_aft
     bare.undeploy_app = lambda: events.append("undeploy")
     bare.deploy_app = lambda: events.append("deploy")
 
-    def advance(start_index):
+    async def advance(start_index):
         assert bare.incident_started_at.tzinfo == UTC
         assert bare.incident_started_at >= context.attempt_started_at
         assert bare.incident_ended_at is None
