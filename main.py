@@ -1103,6 +1103,8 @@ def driver_loop(
                             "run_id": run.artifact_id,
                             "status": (error.proof or {}).get("status", "query_error"),
                         }
+                        if error.attempt_diagnostics is not None:
+                            case_preflight_proof["attempt_diagnostics"] = error.attempt_diagnostics
                         conductor.results["infrastructure_invalid"] = True
                         conductor.results["included_in_diagnosis_pass_rate"] = False
                         conductor.results["observability_error"] = "case_evidence"

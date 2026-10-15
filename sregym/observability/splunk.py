@@ -148,11 +148,49 @@ class SplunkBackendError(RuntimeError):
         status_code: int | None,
         transient: bool,
         retry_after_seconds: float | None = None,
+        diagnostic: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__("Splunk query request failed")
         self.status_code = status_code
         self.transient = transient
         self.retry_after_seconds = retry_after_seconds
+        self._diagnostic: dict[str, str | float] = {}
+        if diagnostic:
+            operation = diagnostic.get("operation")
+            error_kind = diagnostic.get("error_kind")
+            if isinstance(operation, str) and operation in {
+                "getConnections",
+                "createSearchJob",
+                "searchJobsById",
+                "searchJobResultsWithoutFieldsSummary",
+                "StartAnalyticsSearch",
+                "GetAnalyticsSearch",
+                "signalflow_execute",
+            }:
+                self._diagnostic["operation"] = operation
+            if isinstance(error_kind, str) and error_kind in {
+                "ConnectTimeout",
+                "ReadTimeout",
+                "ConnectError",
+                "ReadError",
+                "HTTPStatusError",
+                "GraphQLError",
+                "InvalidResponse",
+            }:
+                self._diagnostic["error_kind"] = error_kind
+            timeout = diagnostic.get("request_timeout_seconds")
+            if (
+                isinstance(timeout, int | float)
+                and not isinstance(timeout, bool)
+                and math.isfinite(timeout)
+                and timeout > 0
+            ):
+                self._diagnostic["request_timeout_seconds"] = float(timeout)
+
+    @property
+    def diagnostic(self) -> dict[str, str | float]:
+        """Only static operation/error identifiers and a numeric request budget."""
+        return self._diagnostic.copy()
 
 
 class SplunkQueryBackend(Protocol):
@@ -771,8 +809,20 @@ class SplunkHttpBackend:
                 content=content,
                 params=query_params,
             )
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError):
-            raise SplunkBackendError(status_code=None, transient=True) from None
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError) as error:
+            raise SplunkBackendError(
+                status_code=None,
+                transient=True,
+                diagnostic={
+                    "operation": "signalflow_execute"
+                    if url == f"{self._stream_base}/v2/signalflow/execute"
+                    else json_body.get("operationName")
+                    if isinstance(json_body, dict)
+                    else None,
+                    "error_kind": type(error).__name__,
+                    "request_timeout_seconds": timeout_seconds,
+                },
+            ) from None
         if response.is_error:
             retry_after = _retry_after(response.headers.get("Retry-After"))
             transient = response.status_code in (408, 429) or response.status_code >= 500
@@ -780,6 +830,15 @@ class SplunkHttpBackend:
                 status_code=response.status_code,
                 transient=transient,
                 retry_after_seconds=retry_after,
+                diagnostic={
+                    "operation": "signalflow_execute"
+                    if url == f"{self._stream_base}/v2/signalflow/execute"
+                    else json_body.get("operationName")
+                    if isinstance(json_body, dict)
+                    else None,
+                    "error_kind": "HTTPStatusError",
+                    "request_timeout_seconds": timeout_seconds,
+                },
             )
         return response
 
@@ -1574,6 +1633,8 @@ class SplunkObservabilityProvider:
                     retry if type(retry) in (int, float) and math.isfinite(retry) and 0 <= retry <= 3600 else None
                 ),
             )
+            if error.diagnostic:
+                row["backend"] = error.diagnostic
         # Never copy exception text, response bodies, request headers or credentials.
         observations.append(row)
 
