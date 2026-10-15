@@ -134,6 +134,7 @@ class Conductor:
         self._aborted_submission_generations: set[int] = set()
         self._accepting_submissions = False
         self._attempt_closed = True
+        self._teardown_phases: list[tuple[int, str, float]] = []
 
         self.tasklist = None
         self.logger = logging.getLogger("all.sregym.conductor")
@@ -206,10 +207,13 @@ class Conductor:
             return None
         assert self._observability_provider is not None
         assert self._observability_context is not None
-        self.observability_readiness = self._observability_provider.wait_until_queryable(
-            self._observability_context,
-            self._application_scope(),
-        )
+        try:
+            self.observability_readiness = self._observability_provider.wait_until_queryable(
+                self._observability_context,
+                self._application_scope(),
+            )
+        finally:
+            self._record_observability_observations()
         return self.observability_readiness
 
     def finish_observability(self) -> DeliveryReport | None:
@@ -220,11 +224,27 @@ class Conductor:
             return self.observability_delivery
         assert self._observability_provider is not None
         assert self._observability_context is not None
-        self.observability_delivery = self._observability_provider.finish_attempt(
-            self._observability_context,
-            self._application_scope(),
-        )
+        try:
+            self.observability_delivery = self._observability_provider.finish_attempt(
+                self._observability_context,
+                self._application_scope(),
+            )
+        finally:
+            self._record_observability_observations()
         return self.observability_delivery
+
+    def _record_observability_observations(self) -> None:
+        # The ledger remains available when strict readiness fails before a
+        # DeliveryReport can exist. Diagnostics must not mask that failure.
+        if getattr(self, "phases", None) is None:
+            return
+        reader = getattr(self._observability_provider, "counter_observation_evidence", None)
+        if not callable(reader):
+            return
+        try:
+            self._mark("collector_observations", "captured", **reader(self._observability_context))
+        except Exception:
+            self.logger.warning("Collector observation diagnostics could not be recorded")
 
     def start_k8s_proxy(self):
         """
@@ -547,6 +567,15 @@ class Conductor:
         problem = self.problem
         cleanup_generation = self._submission_generation if generation is None else generation
         cleanup_errors: list[str] = []
+        with self._submission_lock:
+            if (
+                cleanup_generation != self._submission_generation
+                or cleanup_generation in self._aborted_submission_generations
+            ):
+                return
+            phases = getattr(self, "_teardown_phases", [])
+            self._teardown_phases = [phase for phase in phases if phase[0] == cleanup_generation]
+            self._teardown_phases.append((cleanup_generation, "cleanup", time.monotonic()))
 
         def cleanup_was_abandoned() -> bool:
             with self._submission_lock:
@@ -667,6 +696,9 @@ class Conductor:
             self._accepting_submissions = False
             self._attempt_closed = True
             self.submission_stage = "tearing_down"
+            # Quiescing and delivery auditing precede destructive cleanup. They
+            # must not consume the separate cluster reconciliation budget.
+            self._teardown_phases = [(cleanup_generation, "delivery", time.monotonic())]
         # Only close a stage that is genuinely still open. `submission_stage`
         # still names the last stage after it has been evaluated, so closing on
         # that alone writes a second end for a stage that finished cleanly.
@@ -733,12 +765,14 @@ class Conductor:
                 try:
                     self._finish_problem(generation)
                 except BaseException as exc:
-                    if isinstance(exc, Exception):
-                        future.set_exception(exc)
-                    else:
-                        future.set_exception(RuntimeError(f"Cleanup terminated with {type(exc).__name__}: {exc}"))
+                    error = (
+                        exc
+                        if isinstance(exc, Exception)
+                        else RuntimeError(f"Cleanup terminated with {type(exc).__name__}: {exc}")
+                    )
+                    self._complete_submission_future(future, generation, error=error)
                 else:
-                    future.set_result(None)
+                    self._complete_submission_future(future, generation)
 
             self._submit_future = future
             threading.Thread(
@@ -747,6 +781,28 @@ class Conductor:
                 daemon=True,
             ).start()
             return future
+
+    def _complete_submission_future(
+        self, future: concurrent.futures.Future, generation: int, *, result=None, error: Exception | None = None
+    ) -> None:
+        """Publish a worker result and its teardown end under one ownership lock."""
+        with self._submission_lock:
+            phases = getattr(self, "_teardown_phases", [])
+            if (
+                generation == self._submission_generation
+                and generation not in self._aborted_submission_generations
+                and self._submit_future is future
+                and phases
+                and phases[-1][1] not in {"done", "failed"}
+            ):
+                # Both the final evaluator and the post-exit safety worker can
+                # own teardown. A terminal boundary must not become visible
+                # while that owner's future still appears pending.
+                phases.append((generation, "failed" if error is not None else "done", time.monotonic()))
+            if error is not None:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
 
     async def start_problem(self) -> StartProblemResult:
         """
@@ -782,6 +838,7 @@ class Conductor:
             self._submission_generation += 1
             self._accepting_submissions = False
             self._attempt_closed = False
+            self._teardown_phases = []
             self.submission_stage = "setup"
             self.waiting_for_agent = False
             self._evaluating = False
@@ -1064,12 +1121,14 @@ class Conductor:
                 try:
                     result = self._submit_evaluate_and_advance(sol, current_stage, generation)
                 except BaseException as exc:
-                    if isinstance(exc, Exception):
-                        future.set_exception(exc)
-                    else:
-                        future.set_exception(RuntimeError(f"Evaluator terminated with {type(exc).__name__}: {exc}"))
+                    error = (
+                        exc
+                        if isinstance(exc, Exception)
+                        else RuntimeError(f"Evaluator terminated with {type(exc).__name__}: {exc}")
+                    )
+                    self._complete_submission_future(future, generation, error=error)
                 else:
-                    future.set_result(result)
+                    self._complete_submission_future(future, generation, result=result)
 
             oracle = getattr(self.problem, f"{accepted_stage}_oracle", None)
             self._submit_evaluation_timeout = getattr(oracle, "evaluation_timeout_seconds", None)
@@ -1212,29 +1271,67 @@ class Conductor:
         When diagnosis finishes, that request creates a new evaluation future.
         Looping until both sources are idle prevents cleanup between those two
         evaluations.
+
+        Once teardown starts, delivery auditing and actual cleanup each get
+        this timeout from their own monotonic start. A late/repeated waiter
+        cannot renew either deadline. The worker is never cancelled here;
+        callers abandon timed-out work before allowing any later attempt.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout if timeout is not None else None
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
         while True:
             with self._submission_lock:
                 future = self._submit_future
                 pending = bool(self._pending_submission_stages)
+                future_finished = future is not None and future.done()
+                phases = tuple(
+                    phase for phase in getattr(self, "_teardown_phases", []) if phase[0] == self._submission_generation
+                )
+                # Decide from one observation. Completion after releasing this
+                # lock must be reconsidered with its matching phase history,
+                # rather than consuming an error against an older snapshot.
+                observed_at = time.monotonic()
+            if timeout is not None and phases:
+                # The first wait can occur after delivery, or even after the
+                # whole worker completes. Preserve completed durations so a
+                # phase transition cannot hide an already expired watchdog.
+                for phase, following in zip(phases, phases[1:], strict=False):
+                    if following[2] - phase[2] > timeout:
+                        self.results["teardown_timeout_phase"] = phase[1]
+                        self.results["teardown_timed_out"] = True
+                        # A late first wait may find both an expired phase and
+                        # a completed worker failure. Consume that error before
+                        # the caller's timeout recovery can abandon the future;
+                        # the timeout metadata above still records both facts.
+                        if future is not None and future_finished:
+                            try:
+                                future.result()
+                            finally:
+                                with self._submission_lock:
+                                    if self._submit_future is future:
+                                        self._submit_future = None
+                        raise TimeoutError
+                if phases[-1][1] not in {"done", "failed"}:
+                    deadline = phases[-1][2] + timeout
 
             if future is not None:
+                if deadline is not None and not future_finished:
+                    remaining = deadline - observed_at
+                    if remaining <= 0:
+                        if phases:
+                            self.results["teardown_timeout_phase"] = phases[-1][1]
+                            self.results["teardown_timed_out"] = True
+                        raise TimeoutError
+                    # Recheck the delivery -> cleanup boundary while the same
+                    # future stays active. Consume its result on the next pass;
+                    # never clear a future just because a poll saw it finish.
+                    await asyncio.sleep(min(0.05, remaining))
+                    continue
                 try:
-                    if future.done():
+                    if future_finished:
                         future.result()
-                    elif deadline is None:
-                        await asyncio.shield(asyncio.wrap_future(future))
                     else:
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
-                            raise TimeoutError
-                        await asyncio.wait_for(
-                            asyncio.shield(asyncio.wrap_future(future)),
-                            timeout=remaining,
-                        )
+                        await asyncio.shield(asyncio.wrap_future(future))
                 finally:
                     if future.done():
                         with self._submission_lock:
@@ -1243,7 +1340,7 @@ class Conductor:
                 continue
 
             if pending:
-                if deadline is not None and loop.time() >= deadline:
+                if deadline is not None and observed_at >= deadline:
                     raise TimeoutError
                 await asyncio.sleep(0.05)
                 continue

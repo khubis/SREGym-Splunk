@@ -650,6 +650,91 @@ spec:
             ]
         )
 
+    @staticmethod
+    def _controlled_by(resource, kind, uid):
+        return any(
+            owner.kind == kind and owner.uid == uid and owner.controller
+            for owner in (resource.metadata.owner_references or [])
+        )
+
+    def _current_injection_target(self):
+        deployment = self.kubectl.get_deployment(self.faulty_service, self.namespace)
+        if deployment is None or not deployment.metadata.uid:
+            raise RuntimeError("Webhook injection requires the current Deployment identity")
+        revision = (deployment.metadata.annotations or {}).get("deployment.kubernetes.io/revision")
+        replica_sets = self.kubectl.apps_v1_api.list_namespaced_replica_set(
+            namespace=self.namespace, _request_timeout=10
+        ).items
+        current = [
+            rs
+            for rs in replica_sets
+            if revision
+            and rs.metadata.uid
+            and rs.metadata.deletion_timestamp is None
+            and self._controlled_by(rs, "Deployment", deployment.metadata.uid)
+            and (rs.metadata.annotations or {}).get("deployment.kubernetes.io/revision") == revision
+        ]
+        if len(current) != 1:
+            raise RuntimeError(f"Webhook injection requires one current owned ReplicaSet; found {len(current)}")
+        replica_set = current[0]
+        pods = self.core_api.list_namespaced_pod(
+            namespace=self.namespace, label_selector=f"service={self.faulty_service}", _request_timeout=10
+        ).items
+        owned = [p for p in pods if self._controlled_by(p, "ReplicaSet", replica_set.metadata.uid)]
+        live = [
+            p
+            for p in owned
+            if p.metadata.uid
+            and p.metadata.deletion_timestamp is None
+            and getattr(p.status, "phase", None) not in ("Succeeded", "Failed")
+        ]
+        if len(live) != 1:
+            raise RuntimeError(f"Webhook injection requires one live current owned Pod; found {len(live)}")
+        return replica_set, live[0], {p.metadata.uid for p in pods if p.metadata.uid}
+
+    def _wait_for_injected_replacement(self, replica_set, prior_uids):
+        deadline = time.monotonic() + 180
+        samples = []
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            pods = self.core_api.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector=f"service={self.faulty_service}",
+                _request_timeout=(min(5, remaining / 2), min(5, remaining / 2)),
+            ).items
+            samples = []
+            for pod in pods:
+                if (
+                    not pod.metadata.uid
+                    or pod.metadata.uid in prior_uids
+                    or pod.metadata.deletion_timestamp is not None
+                    or not self._controlled_by(pod, "ReplicaSet", replica_set.metadata.uid)
+                ):
+                    continue
+                container = next((c for c in pod.spec.containers if c.name == self.faulty_service), None)
+                resources = container.resources if container else None
+                request = (resources.requests or {}).get("memory") if resources else None
+                limit = (resources.limits or {}).get("memory") if resources else None
+                statuses = getattr(pod.status, "container_statuses", None) or []
+                status = next((s for s in statuses if s.name == self.faulty_service), None)
+                reasons = [
+                    getattr(getattr(state, "terminated", None), "reason", None)
+                    for state in (getattr(status, "state", None), getattr(status, "last_state", None))
+                ]
+                sample = {
+                    "pod": pod.metadata.name,
+                    "uid": pod.metadata.uid,
+                    "requests_memory": request,
+                    "limits_memory": limit,
+                    "termination_reasons": reasons,
+                }
+                samples.append(sample)
+                if request == self.INJECTED_MEMORY and limit == self.INJECTED_MEMORY and "OOMKilled" in reasons:
+                    return sample
+            time.sleep(min(3, max(0, deadline - time.monotonic())))
+        print("[Fault Injection Evidence] " + json.dumps({"replacement_observations": samples}))
+        raise RuntimeError("Webhook injection did not produce a new current owned 16Mi/OOMKilled Pod within 180s")
+
     @mark_fault_injected
     def inject_fault(self):
         print("== Fault Injection ==")
@@ -687,23 +772,25 @@ spec:
 
         time.sleep(8)
 
-        pods = self.core_api.list_namespaced_pod(
-            namespace=self.namespace,
-            label_selector=f"service={self.faulty_service}",
-        )
-        if not pods.items:
-            raise RuntimeError(f"No pods found for service '{self.faulty_service}' in namespace '{self.namespace}'")
-
-        target = pods.items[0].metadata.name
+        replica_set, target, prior_uids = self._current_injection_target()
+        selection = {
+            "replica_set": replica_set.metadata.name,
+            "replica_set_uid": replica_set.metadata.uid,
+            "deleted_pod": target.metadata.name,
+            "deleted_uid": target.metadata.uid,
+        }
+        print("[Fault Injection Target] " + json.dumps(selection))
         self.core_api.delete_namespaced_pod(
-            name=target,
+            name=target.metadata.name,
             namespace=self.namespace,
-            body=client.V1DeleteOptions(grace_period_seconds=0),
+            body=client.V1DeleteOptions(
+                grace_period_seconds=0, preconditions=client.V1Preconditions(uid=target.metadata.uid)
+            ),
+            _request_timeout=10,
         )
-        print(
-            f"Deleted pod {target}; replacement pod will be mutated to "
-            f"requests={self.INJECTED_MEMORY}, limits={self.INJECTED_MEMORY}"
-        )
+        replacement = self._wait_for_injected_replacement(replica_set, prior_uids)
+        self.fault_injection_evidence = {**selection, "replacement": replacement}
+        print("[Fault Injection Verified] " + json.dumps(self.fault_injection_evidence))
         print(f"Service: {self.faulty_service} | Namespace: {self.namespace}\n")
 
     @mark_fault_injected

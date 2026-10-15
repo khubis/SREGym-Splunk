@@ -98,6 +98,7 @@ class DriverRunConfig:
     attempt_started_at: datetime | None = None
     telemetry_window_ended_at: datetime | None = None
     symptom: str | None = None
+    resolved_logs_connection_id: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -109,6 +110,15 @@ class DriverRunConfig:
             raise ArtifactError("Assistant driver configuration must be an object")
         readiness_value = payload.get("readiness_report")
         readiness_report = _readiness_from_dict(readiness_value) if readiness_value is not None else None
+        # Older producers stored the resolved ID without preserving whether it
+        # was configured. Keep that routing observation, not a selection claim.
+        has_selection_provenance = "resolved_logs_connection_id" in payload
+        selected_connection = payload.get("logs_connection_id") if has_selection_provenance else None
+        resolved_connection = (
+            payload.get("resolved_logs_connection_id")
+            if has_selection_provenance
+            else payload.get("logs_connection_id")
+        )
         try:
             config = cls(
                 run_id=payload["run_id"],
@@ -123,7 +133,8 @@ class DriverRunConfig:
                 agent_version=payload.get("agent_version"),
                 observability_chart_version=payload.get("observability_chart_version"),
                 hec_index=payload.get("hec_index"),
-                logs_connection_id=payload.get("logs_connection_id"),
+                logs_connection_id=selected_connection,
+                resolved_logs_connection_id=resolved_connection,
                 attempt_started_at=(
                     datetime.fromisoformat(payload["attempt_started_at"].replace("Z", "+00:00"))
                     if isinstance(payload.get("attempt_started_at"), str)
@@ -161,6 +172,22 @@ class DriverRunConfig:
             raise ArtifactError("judge model and backend must be explicit")
         if self.readiness_report is not None and self.readiness_report.run_id != self.run_id:
             raise ArtifactError("readiness and driver identities must match")
+        if self.observability_provider == "splunk" and self.logs_connection_id is not None and not self.hec_index:
+            raise ArtifactError("A selected Logs connection requires an explicit HEC index for incident scope")
+        for label, connection in (
+            ("selected", self.logs_connection_id),
+            ("resolved", self.resolved_logs_connection_id),
+        ):
+            if connection is not None and (
+                not isinstance(connection, str) or not connection.strip() or connection != connection.strip()
+            ):
+                raise ArtifactError(f"{label} Logs connection must be a non-empty ID")
+        if (
+            self.logs_connection_id is not None
+            and self.resolved_logs_connection_id is not None
+            and self.logs_connection_id != self.resolved_logs_connection_id
+        ):
+            raise ArtifactError("resolved Logs connection must match the selected Logs connection")
         for label, timestamp in (
             ("attempt start", self.attempt_started_at),
             ("telemetry window end", self.telemetry_window_ended_at),
@@ -265,6 +292,7 @@ class AssistantRequest:
     requested_reasoning: str
     action_instructions: str | None = None
     action_profile_id: str | None = None
+    incident_scope: dict[str, Any] | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
@@ -300,6 +328,8 @@ class AssistantRequest:
             result["action_instructions"] = self.action_instructions
         if self.action_profile_id is not None:
             result["action_profile_id"] = self.action_profile_id
+        if self.incident_scope is not None:
+            result["incident_scope"] = self.incident_scope
         return result
 
 
@@ -736,6 +766,8 @@ def _delivery_payload(delivery: DeliveryReport) -> dict[str, Any]:
         payload.pop("queue_drain_minimum")
     if delivery.counter_samples is None:
         payload.pop("counter_samples")
+    if delivery.counter_observations is None:
+        payload.pop("counter_observations")
     return payload
 
 
@@ -904,6 +936,7 @@ def execute_assistant_attempt(
     rendered: RenderedPrompt | None = None
     action_instructions: str | None = None
     events: tuple[AssistantEvent, ...] = ()
+    incident_scope: dict[str, Any] | None = None
     event_spool = config.artifacts_root / "assistant_v3" / "events.partial.jsonl"
     session_id: str | None = None
     retry_count = 0
@@ -921,10 +954,34 @@ def execute_assistant_attempt(
             window_ended_at,
             symptom=config.symptom,
         )
+        if config.observability_provider == "splunk":
+            # Conductor joins composite namespaces for prompt display. The
+            # receiver requires one literal namespace, not that display list.
+            if "," in prompt_context["app_namespace"]:
+                raise ConductorError("Structured incident scope requires one application namespace")
+            # The Splunk exporter writes these exact resource identities; this
+            # structured context contains no scenario, oracle or fault content.
+            incident_scope = {
+                "environment": config.run_id,
+                "cluster": config.run_id,
+                "namespace": prompt_context["app_namespace"],
+                "start_ms": int(window_started_at.timestamp() * 1000),
+                "end_ms": int(window_ended_at.timestamp() * 1000),
+            }
+            connection_id = config.resolved_logs_connection_id or config.logs_connection_id
+            if connection_id and config.hec_index:
+                incident_scope["logs_source"] = {
+                    "connection_id": connection_id,
+                    "index": config.hec_index,
+                }
+        # Selector enforcement belongs to the compatible receiver required by
+        # the session contract. Retain the request and native calls for audit;
+        # a completed stream alone is not a scope-capability acknowledgement.
         result = assistant.run_session(
             prompt=rendered.text,
             request_id=_assistant_request_id(config.run_id),
             action_instructions=action_instructions,
+            **({"incident_scope": incident_scope} if incident_scope is not None else {}),
             event_sink=lambda item: _append_event_spool(event_spool, item),
         )
         events = result.events
@@ -1050,6 +1107,7 @@ def execute_assistant_attempt(
         requested_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
         action_instructions=action_instructions,
+        incident_scope=incident_scope,
         action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
     )
     metadata = AssistantRunMetadata(
@@ -1070,7 +1128,7 @@ def execute_assistant_attempt(
         observability_provider=config.observability_provider,
         observability_chart_version=config.observability_chart_version,
         hec_index=config.hec_index,
-        logs_connection_id=config.logs_connection_id,
+        logs_connection_id=config.resolved_logs_connection_id or config.logs_connection_id,
         readiness_report=config.readiness_report,
         attempt_started_at=config.attempt_started_at or started_at,
         agent_started_at=started_at,
@@ -1163,7 +1221,7 @@ def write_pre_agent_failure(
         observability_provider=config.observability_provider,
         observability_chart_version=config.observability_chart_version,
         hec_index=config.hec_index,
-        logs_connection_id=config.logs_connection_id,
+        logs_connection_id=config.resolved_logs_connection_id or config.logs_connection_id,
         readiness_report=config.readiness_report,
         attempt_started_at=config.attempt_started_at or timestamp,
         agent_started_at=None,

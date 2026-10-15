@@ -359,6 +359,7 @@ def _write_assistant_driver_config(
         "observability_chart_version": driver_config.observability_chart_version,
         "hec_index": driver_config.hec_index,
         "logs_connection_id": driver_config.logs_connection_id,
+        "resolved_logs_connection_id": driver_config.resolved_logs_connection_id,
         "symptom": driver_config.symptom,
         "attempt_started_at": (
             driver_config.attempt_started_at.isoformat().replace("+00:00", "Z")
@@ -410,7 +411,8 @@ def _assistant_driver_config(
         agent_version=agent_version,
         observability_chart_version="0.160.0" if provider.name == "splunk" else None,
         hec_index=getattr(configuration, "hec_index", None),
-        logs_connection_id=getattr(provider, "_connection_id", None),
+        logs_connection_id=getattr(configuration, "logs_connection_id", None),
+        resolved_logs_connection_id=getattr(provider, "_connection_id", None),
         attempt_started_at=(
             getattr(conductor, "incident_started_at", None)
             or getattr(attempt_context, "attempt_started_at", None)

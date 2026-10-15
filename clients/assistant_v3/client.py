@@ -214,6 +214,7 @@ class AssistantV3Client:
         prompt: str,
         request_id: str,
         action_instructions: str | None = None,
+        incident_scope: dict[str, Any] | None = None,
         event_sink: Callable[[AssistantEvent], None] | None = None,
     ) -> AssistantSessionResult:
         """Run one fresh session and return only an unambiguous completion."""
@@ -243,6 +244,8 @@ class AssistantV3Client:
                 }
                 if action_instructions is not None:
                     request_body["action_instructions"] = action_instructions
+                if incident_scope is not None:
+                    request_body["incident_scope"] = dict(incident_scope)
                 with self._client.stream(
                     "POST",
                     self._session_url,
