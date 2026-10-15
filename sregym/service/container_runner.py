@@ -323,9 +323,7 @@ class ContainerRunner:
             rules.add(EndpointRule("host.docker.internal", self.config.k8s_proxy_port, inspect_tools=False))
         if self.config.sregym_mcp_access:
             rules.add(
-                EndpointRule(
-                    "host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False
-                )
+                EndpointRule("host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False)
             )
         if (self.config.internet_policy.agent_name or "").casefold() == "assistant_v3":
             assistant_url = env_vars.get("ASSISTANT_V3_URL", "").strip()

@@ -1,3 +1,5 @@
+> Current upstream SREGym 1.1 Lite contains 17 active cases. The earlier 21-case results and retired prompt recipes are historical evidence; current runs use the upstream registry. Model and judge settings are unchanged.
+
 # Run Assistant V3 against Splunk with SREGym-Lite
 
 This fork's wrapper runs one or all 21 Lite cases sequentially: inject a fault,
