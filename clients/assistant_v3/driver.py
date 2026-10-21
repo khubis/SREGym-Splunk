@@ -20,7 +20,13 @@ import httpx
 
 from clients.assistant_v3.client import AssistantEvent, AssistantV3Client, AssistantV3Config, AssistantV3Error
 from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt, render_prompt
-from sregym.observability.base import DeliveryReport, ReadinessReport, SignalReadiness, validate_run_id
+from sregym.observability.base import (
+    DeliveryReport,
+    ReadinessReport,
+    SignalReadiness,
+    validate_cluster_name,
+    validate_run_id,
+)
 
 CAPABILITY_PROFILE = "splunk_o11y_read_only_no_direct_kubernetes"
 
@@ -99,6 +105,7 @@ class DriverRunConfig:
     telemetry_window_ended_at: datetime | None = None
     symptom: str | None = None
     resolved_logs_connection_id: str | None = None
+    cluster_name: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -146,6 +153,7 @@ class DriverRunConfig:
                     else None
                 ),
                 symptom=payload.get("symptom"),
+                cluster_name=payload.get("cluster_name"),
             )
         except (KeyError, TypeError, ValueError):
             raise ArtifactError("Assistant driver configuration is incomplete") from None
@@ -154,6 +162,8 @@ class DriverRunConfig:
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
+        if self.cluster_name is not None:
+            validate_cluster_name(self.cluster_name)
         if self.attempt < 1:
             raise ArtifactError("attempt number must be positive")
         if self.benchmark_profile not in {"full", "svelte"}:
@@ -399,9 +409,12 @@ class AssistantRunMetadata:
     agent_ended_at: datetime | None
     classification: TerminalOutcome
     telemetry_scope_warning: str | None = None
+    cluster_name: str | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
+        if self.cluster_name is not None:
+            validate_cluster_name(self.cluster_name)
         if self.attempt < 1:
             raise ArtifactError("attempt number must be positive")
         required_strings = (
@@ -467,6 +480,7 @@ class AssistantRunMetadata:
             "observability_chart_version": self.observability_chart_version,
             "hec_index": self.hec_index,
             "logs_connection_id": self.logs_connection_id,
+            **({"cluster_name": self.cluster_name} if self.cluster_name is not None else {}),
             "readiness_report": asdict(self.readiness_report) if self.readiness_report is not None else None,
             "attempt_started_at": self.attempt_started_at,
             "agent_started_at": self.agent_started_at,
@@ -963,7 +977,7 @@ def execute_assistant_attempt(
             # structured context contains no scenario, oracle or fault content.
             incident_scope = {
                 "environment": config.run_id,
-                "cluster": config.run_id,
+                "cluster": config.cluster_name or config.run_id,
                 "namespace": prompt_context["app_namespace"],
                 "start_ms": int(window_started_at.timestamp() * 1000),
                 "end_ms": int(window_ended_at.timestamp() * 1000),
@@ -1135,6 +1149,7 @@ def execute_assistant_attempt(
         agent_ended_at=ended_at,
         classification=terminal.outcome,
         telemetry_scope_warning=scope_warning,
+        cluster_name=config.cluster_name,
     )
     write_result = AssistantArtifactStore(
         config.artifacts_root,
@@ -1227,6 +1242,7 @@ def write_pre_agent_failure(
         agent_started_at=None,
         agent_ended_at=None,
         classification="infrastructure_invalid",
+        cluster_name=config.cluster_name,
     )
     return AssistantArtifactStore(
         config.artifacts_root,

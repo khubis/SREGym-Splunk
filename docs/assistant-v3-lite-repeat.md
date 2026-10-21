@@ -2,7 +2,36 @@
 
 # Run Assistant V3 against Splunk with SREGym-Lite
 
-This fork's wrapper runs one or all 21 Lite cases sequentially: inject a fault,
+## Stable Kubernetes cluster identity
+
+Set `SPLUNK_CLUSTER_NAME=sregym-kind-local` in the private environment file to
+keep one Splunk cluster identity across attempts and local Kind recreations.
+Use a distinct name for each physical cluster exporting to the same org. This
+name is what the Kubernetes Context Connector wizard should select.
+
+Run from the feature worktree containing this change and pass the shared env
+file explicitly, as shown below. Each attempt's collector setup reads the name;
+adding the variable alone does not rename an already deployed collector or add
+support to an older checkout. After recreating Kind, reinstall telemetry and the
+connector using the same configured name.
+
+Attempt identity remains separate: metrics and logs carry `sregym.run.id`, and
+traces retain the unique deployment environment. Delivery/evidence queries use
+the stable cluster plus the attempt scope. Assistant receives the same stable
+cluster in its structured incident context. New run metadata saves `cluster_name`
+so later evidence checks use the original identity even if local settings change.
+Older saved attempts without that field continue to use their run ID as cluster
+name. Leaving `SPLUNK_CLUSTER_NAME` unset preserves that legacy configuration
+behavior; the current template opts in to the stable name.
+
+This setting does not enable Interplex tool use in the existing Splunk-only
+benchmark capability mode. Connector onboarding and capability/visibility checks
+are separate. To rename an existing idle collector before onboarding, update its
+Helm `clusterName` and matching collector telemetry attribute together, preserve
+its attempt attributes, then verify fresh metrics under the stable name. Do not
+start a new attempt merely to rename a cluster.
+
+This fork's wrapper runs one or all 17 active Lite cases sequentially: inject a fault,
 send metrics/traces/logs/events to your Splunk org, check representative causal
 telemetry before launching Assistant V3, collect its diagnosis and ATIF trace,
 grade it with the unchanged benchmark judge, and package the results by case.

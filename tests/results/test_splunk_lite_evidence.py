@@ -60,14 +60,22 @@ def make_run(tmp_path: Path, *, connection="HPEC1vyAAAA", profile="sregym-stratu
     return run
 
 
-def test_verifier_uses_exact_window_connection_and_saves_sanitized_partial_proof(tmp_path):
+@pytest.mark.parametrize("cluster_name", [None, "sregym-kind-local"])
+def test_verifier_uses_exact_window_connection_and_saves_sanitized_partial_proof(tmp_path, cluster_name):
     run = make_run(tmp_path)
+    if cluster_name is not None:
+        metadata_path = run / "run_metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["cluster_name"] = cluster_name
+        metadata_path.write_text(json.dumps(metadata))
     backend = FakeBackend(failures={"pods"})
     path = verify_case_delivery(run, backend=backend, expected_connection="HPEC1vyAAAA", query_attempts=1)
     proof = json.loads(path.read_text())
 
     assert path == run / "splunk_lite_delivery.json"
     assert proof["schema"] == "sregym.splunk_lite_delivery.v1"
+    assert proof["cluster_name"] == (cluster_name or RUN_ID)
+    assert all(call[1].cluster_name == (cluster_name or RUN_ID) for call in backend.calls)
     assert proof["case_id"] == CASE
     assert proof["window"] == {"start": START, "end": END}
     assert proof["logs_connection_id"] == "HPEC1vyAAAA"
@@ -163,6 +171,8 @@ def test_verifier_rejects_missing_or_invalid_attempt_json(tmp_path, filename, co
     ("problem_id", "not-a-lite-case", "registered Lite"),
     ("observability_provider", "none", "Splunk provider"),
     ("run_id", None, "opaque run identity"),
+    ("cluster_name", "", "invalid cluster identity"),
+    ("cluster_name", ["sregym-kind-local"], "invalid cluster identity"),
 ])
 def test_verifier_rejects_wrong_attempt_metadata(tmp_path, field, value, message):
     run = make_run(tmp_path)

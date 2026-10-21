@@ -20,6 +20,7 @@ FailureKind = Literal[
 SIGNAL_NAMES: tuple[SignalName, ...] = ("metrics", "traces", "logs", "kubernetes_events")
 _FAILURE_KINDS = frozenset(get_args(FailureKind))
 _RUN_ID_PATTERN = re.compile(r"anon_[0-9a-f]{32}\Z")
+_CLUSTER_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
 def new_run_id() -> str:
@@ -34,6 +35,13 @@ def validate_run_id(run_id: str) -> str:
     return run_id
 
 
+def validate_cluster_name(cluster_name: str) -> str:
+    """Accept literal cluster identities safe in SPL, SignalFlow and selectors."""
+    if not isinstance(cluster_name, str) or _CLUSTER_NAME_PATTERN.fullmatch(cluster_name) is None:
+        raise ValueError("cluster name must be 1-128 letters, digits, dots, underscores or hyphens")
+    return cluster_name
+
+
 def _validate_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError("attempt_started_at must be timezone-aware UTC")
@@ -45,10 +53,13 @@ class AttemptContext:
     profile: str
     comparable: bool
     attempt_started_at: datetime
+    cluster_name: str | None = None
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
         _validate_utc(self.attempt_started_at)
+        if self.cluster_name is not None:
+            validate_cluster_name(self.cluster_name)
 
 
 @dataclass(frozen=True)

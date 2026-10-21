@@ -19,7 +19,7 @@ from typing import Protocol
 import yaml
 
 from sregym.conductor.problem_sets import SREGYM_LITE_PROBLEMS
-from sregym.observability.base import ApplicationScope, AttemptContext, SignalName
+from sregym.observability.base import ApplicationScope, AttemptContext, SignalName, validate_cluster_name
 from sregym.observability.splunk import SIGNALFLOW_INGESTION_LAG, SplunkConfig, SplunkHttpBackend
 from sregym.results.assistant_v3_campaign import _atomic_write
 from sregym.results.splunk_lite_cases import load_prompt_recipe
@@ -126,7 +126,18 @@ def verify_case_delivery(
     namespace = app.get("Namespace")
     if not isinstance(namespace, str) or not namespace:
         raise EvidenceError("application namespace is unavailable")
-    context = AttemptContext(run_id, str(metadata.get("benchmark_profile")), bool(metadata.get("comparable")), start)
+    # Saved evidence owns its cluster identity. Older attempts used run_id as
+    # clusterName and must not inherit a newly configured stable cluster.
+    saved_cluster = metadata.get("cluster_name")
+    cluster_name = run_id if saved_cluster is None else saved_cluster
+    try:
+        validate_cluster_name(cluster_name)
+    except ValueError:
+        raise EvidenceError("attempt has an invalid cluster identity") from None
+    context = AttemptContext(
+        run_id, str(metadata.get("benchmark_profile")), bool(metadata.get("comparable")), start,
+        cluster_name=cluster_name,
+    )
     scope = ApplicationScope(app_name=str(app["Name"]), namespaces=(namespace,))
 
     checks: dict[str, dict[str, int | str | None]] = {}
@@ -156,6 +167,7 @@ def verify_case_delivery(
         "schema": "sregym.splunk_lite_delivery.v1",
         "case_id": case_id,
         "run_id": run_id,
+        "cluster_name": cluster_name,
         "attempt": metadata.get("attempt"),
         "window": {"start": start_text, "end": end_text},
         "logs_connection_id": expected_connection,

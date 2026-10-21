@@ -108,7 +108,9 @@ The provider CLI selection is `--observability-provider none|splunk`, default `n
 
 - Helm chart version is exactly `0.160.0`.
 - The release and namespace names are constant and contain no problem ID.
-- `clusterName` and resource attribute `sregym.run.id` equal `AttemptContext.run_id`.
+- When `SPLUNK_CLUSTER_NAME` is configured, `clusterName` is that stable physical-cluster identity. Without it, existing configurations retain `AttemptContext.run_id` as the cluster name.
+- Resource attribute `sregym.run.id` and the deployment environment remain `AttemptContext.run_id` in both modes. Stable-cluster queries must also require the attempt identity; APM uses the standard `sf_environment` filter for the exported deployment environment.
+- Assistant driver configuration and new run metadata preserve the selected `cluster_name`. Saved older artifacts without that field are rechecked using their original cluster-equals-run-ID identity, never the current environment's cluster override.
 - A Kubernetes Secret is created/updated with keys expected by the chart and referenced using `secret.create=false`.
 - Secret values may be supplied only as Kubernetes API request bodies; never as Helm arguments, files in the repository, logs, exceptions, or artifact evidence.
 - HEC uses `https://<SPLUNK_HOST>:<SPLUNK_HEC_PORT>/services/collector/event`; certificate verification remains enabled.

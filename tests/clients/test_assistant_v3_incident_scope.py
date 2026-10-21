@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from test_assistant_v3_client import client_for, complete_stream, streaming_response
 
 from clients.assistant_v3.driver import ConductorClient, DriverRunConfig, execute_assistant_attempt
@@ -33,7 +34,8 @@ def test_client_transports_incident_scope_without_changing_prompt():
     assert RUN_ID not in observed[0]["prompt"]
 
 
-def test_splunk_driver_sends_exported_identity_in_separate_scope(tmp_path):
+@pytest.mark.parametrize("cluster_name", [None, "sregym-kind-local"])
+def test_splunk_driver_sends_exported_identity_in_separate_scope(tmp_path, cluster_name):
     observed = []
 
     def assistant_handler(request):
@@ -61,6 +63,7 @@ def test_splunk_driver_sends_exported_identity_in_separate_scope(tmp_path):
         readiness_report=None,
         attempt_started_at=START,
         telemetry_window_ended_at=END,
+        cluster_name=cluster_name,
     )
     execute_assistant_attempt(
         config,
@@ -69,6 +72,8 @@ def test_splunk_driver_sends_exported_identity_in_separate_scope(tmp_path):
         ),
         assistant=client_for(assistant_handler),
     )
-    assert observed[0]["incident_scope"] == SCOPE
+    assert observed[0]["incident_scope"] == {**SCOPE, "cluster": cluster_name or RUN_ID}
+    metadata = json.loads((tmp_path / "run_metadata.json").read_text())
+    assert metadata.get("cluster_name") == cluster_name
     assert RUN_ID not in observed[0]["prompt"]
     assert RUN_ID not in observed[0]["action_instructions"]
