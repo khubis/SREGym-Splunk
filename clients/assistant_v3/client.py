@@ -32,6 +32,28 @@ _REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 _TRANSIENT_STATUSES = frozenset({408, 429, *range(500, 600)})
 _REDACTION_MARKER = "[REDACTED]"
 _SESSION_PATH = "/v2/assistant/sessions"
+CAPABILITY_PROFILE = "splunk_o11y_read_only_no_direct_kubernetes"
+INTERPLEX_CAPABILITY_PROFILE = "splunk_o11y_read_only_interplex_pilot"
+CAPABILITY_PROFILES = frozenset({CAPABILITY_PROFILE, INTERPLEX_CAPABILITY_PROFILE})
+_INTERPLEX_READ_TOOLS = frozenset(
+    "k8s_" + name
+    for name in (
+        "find_owner_chain",
+        "get_cluster_health",
+        "get_node",
+        "get_node_resource_usage",
+        "get_pod",
+        "get_pod_logs",
+        "get_resource",
+        "get_service_endpoints",
+        "list_api_resource_types",
+        "list_events",
+        "list_namespaces",
+        "list_nodes",
+        "list_pods",
+        "list_resources",
+    )
+)
 
 
 class AssistantV3Error(RuntimeError):
@@ -62,8 +84,11 @@ class AssistantV3Config:
     sf_token: str
     model: str
     reasoning: ReasoningEffort
+    capability_profile: str = CAPABILITY_PROFILE
 
     def __post_init__(self) -> None:
+        if self.capability_profile not in CAPABILITY_PROFILES:
+            raise AssistantV3Error("configuration", "Assistant capability profile is unsupported")
         base_url = _validated_base_url(self.base_url)
         if not isinstance(self.model, str) or not self.model.strip():
             raise AssistantV3Error("configuration", "Assistant configuration requires a non-empty model")
@@ -101,6 +126,7 @@ class AssistantV3Config:
             sf_token=source["SF_TOKEN"],
             model=source["AGENT_MODEL_ID"],
             reasoning=cast(ReasoningEffort, source["AGENT_REASONING_EFFORT"]),
+            capability_profile=source.get("ASSISTANT_V3_CAPABILITY_PROFILE", CAPABILITY_PROFILE),
         )
 
 
@@ -284,6 +310,13 @@ class AssistantV3Client:
                                 attempt,
                                 events,
                             ) from None
+                        if self.configuration.capability_profile == INTERPLEX_CAPABILITY_PROFILE and event_name in {
+                            "agent.thinking",
+                            "message.thinking",
+                            "assistant.subagent.delta",
+                        }:
+                            # Retain observable actions/results, not reasoning streams.
+                            continue
                         if not isinstance(parsed, dict):
                             raise self._stream_error(
                                 "incomplete_stream",
@@ -307,7 +340,10 @@ class AssistantV3Client:
 
                         if event_name != "ping":
                             meaningful_seen = True
-                        if _is_direct_kubernetes_event(event_name, native_event.data):
+                        if _is_direct_kubernetes_event(event_name, native_event.data) and not (
+                            self.configuration.capability_profile == INTERPLEX_CAPABILITY_PROFILE
+                            and _is_interplex_read_event(event_name, native_event.data, incident_scope)
+                        ):
                             capability_violation = True
                         if event_name == "session.created":
                             candidate_session_id = native_event.data.get("session_id")
@@ -615,6 +651,38 @@ def _is_direct_kubernetes_event(event_name: str, data: Mapping[str, Any]) -> boo
         if normalized == "k8s" or normalized.startswith(("k8s_", "kubectl", "kubernetes")):
             return True
     return False
+
+
+def interplex_pilot_action_suffix(scope: Mapping[str, Any]) -> str:
+    """Versioned public selector suffix shared by execution and evidence validation."""
+    return (
+        "\nRead-only integration pilot. The fault remains active during this investigation. "
+        "Live Kubernetes observations may be collected now; record collection time and "
+        "distinguish current state from historical telemetry and onset evidence. "
+        "Do not modify resources or write persistent memory. "
+        "Scope all evidence to these public target selectors: " + json.dumps(dict(scope), sort_keys=True)
+    )
+
+
+def _is_interplex_read_event(event_name: str, data: Mapping[str, Any], scope: Mapping[str, Any] | None) -> bool:
+    """Audit known read tools; this does not replace server-side authorization."""
+    role_names = {"kubernetes", "kubernetes_investigator"}
+    candidates = [
+        data[key].strip().lower().replace("-", "_")
+        for key in ("name", "tool_name", "server", "server_id", "connector", "connector_name")
+        if isinstance(data.get(key), str)
+    ]
+    kubernetes = [name for name in candidates if name.startswith(("k8s", "kubectl", "kubernetes"))]
+    if not kubernetes or any(name not in _INTERPLEX_READ_TOOLS | role_names for name in kubernetes):
+        return False
+    if event_name == "tool.use" or (event_name == "assistant.subagent.action" and data.get("status") == "running"):
+        if any(name in _INTERPLEX_READ_TOOLS for name in kubernetes):
+            args = data.get("input")
+            if not isinstance(args, Mapping) or not scope or args.get("clusterName") != scope.get("cluster"):
+                return False
+            if args.get("namespace") is not None and args.get("namespace") != scope.get("namespace"):
+                return False
+    return True
 
 
 __all__ = [

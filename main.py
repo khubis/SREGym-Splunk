@@ -188,7 +188,7 @@ def run_preflight_check(
     if agent_name == "assistant_v3":
         preflight_env = {
             name: os.environ[name]
-            for name in ("ASSISTANT_V3_URL", "ASSISTANT_V3_AUTH_TOKEN", "SF_TOKEN")
+            for name in ("ASSISTANT_V3_URL", "ASSISTANT_V3_AUTH_TOKEN", "SF_TOKEN", "ASSISTANT_V3_CAPABILITY_PROFILE")
             if os.environ.get(name)
         }
     try:
@@ -321,6 +321,7 @@ def _artifact_environment(run: RunArtifacts):
 def _assistant_runtime_environment() -> dict[str, str]:
     """Return only the Assistant credentials/config needed by its isolated driver."""
     names = (
+        "ASSISTANT_V3_CAPABILITY_PROFILE",
         "ASSISTANT_V3_URL",
         "ASSISTANT_V3_AUTH_TOKEN",
         "SF_TOKEN",
@@ -366,6 +367,7 @@ def _write_assistant_driver_config(
         "logs_connection_id": driver_config.logs_connection_id,
         "resolved_logs_connection_id": driver_config.resolved_logs_connection_id,
         "cluster_name": driver_config.cluster_name,
+        "capability_profile": driver_config.capability_profile,
         "symptom": driver_config.symptom,
         "attempt_started_at": (
             driver_config.attempt_started_at.isoformat().replace("+00:00", "Z")
@@ -409,7 +411,12 @@ def _assistant_driver_config(
         attempt=run.attempt,
         artifacts_root=run.active_dir,
         benchmark_profile=get_profile(),
-        comparable=get_profile() == "full" and symptom is None,
+        comparable=(
+            get_profile() == "full"
+            and symptom is None
+            and os.environ.get("ASSISTANT_V3_CAPABILITY_PROFILE", "splunk_o11y_read_only_no_direct_kubernetes")
+            == "splunk_o11y_read_only_no_direct_kubernetes"
+        ),
         judge_model=os.environ["JUDGE_MODEL_ID"],
         judge_backend=judge_backend,
         observability_provider=provider.name,
@@ -420,6 +427,9 @@ def _assistant_driver_config(
         logs_connection_id=getattr(configuration, "logs_connection_id", None),
         resolved_logs_connection_id=getattr(provider, "_connection_id", None),
         cluster_name=getattr(configuration, "cluster_name", None),
+        capability_profile=os.environ.get(
+            "ASSISTANT_V3_CAPABILITY_PROFILE", "splunk_o11y_read_only_no_direct_kubernetes"
+        ),
         attempt_started_at=(
             getattr(conductor, "incident_started_at", None) or getattr(attempt_context, "attempt_started_at", None)
         ),

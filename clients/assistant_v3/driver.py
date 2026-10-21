@@ -18,7 +18,16 @@ from uuid import UUID
 
 import httpx
 
-from clients.assistant_v3.client import AssistantEvent, AssistantV3Client, AssistantV3Config, AssistantV3Error
+from clients.assistant_v3.client import (
+    CAPABILITY_PROFILE,
+    CAPABILITY_PROFILES,
+    INTERPLEX_CAPABILITY_PROFILE,
+    AssistantEvent,
+    AssistantV3Client,
+    AssistantV3Config,
+    AssistantV3Error,
+    interplex_pilot_action_suffix,
+)
 from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt, render_prompt
 from sregym.observability.base import (
     DeliveryReport,
@@ -27,8 +36,6 @@ from sregym.observability.base import (
     validate_cluster_name,
     validate_run_id,
 )
-
-CAPABILITY_PROFILE = "splunk_o11y_read_only_no_direct_kubernetes"
 
 TerminalOutcome = Literal[
     "completed",
@@ -106,6 +113,7 @@ class DriverRunConfig:
     symptom: str | None = None
     resolved_logs_connection_id: str | None = None
     cluster_name: str | None = None
+    capability_profile: str = CAPABILITY_PROFILE
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -154,6 +162,7 @@ class DriverRunConfig:
                 ),
                 symptom=payload.get("symptom"),
                 cluster_name=payload.get("cluster_name"),
+                capability_profile=payload.get("capability_profile", CAPABILITY_PROFILE),
             )
         except (KeyError, TypeError, ValueError):
             raise ArtifactError("Assistant driver configuration is incomplete") from None
@@ -161,6 +170,12 @@ class DriverRunConfig:
         return config
 
     def validate(self) -> None:
+        if self.capability_profile not in CAPABILITY_PROFILES:
+            raise ArtifactError("unsupported capability profile")
+        if self.capability_profile == INTERPLEX_CAPABILITY_PROFILE and (
+            self.comparable or self.observability_provider != "splunk" or not self.cluster_name
+        ):
+            raise ArtifactError("Interplex pilot requires Splunk, a stable cluster and comparable=false")
         validate_run_id(self.run_id)
         if self.cluster_name is not None:
             validate_cluster_name(self.cluster_name)
@@ -427,7 +442,9 @@ class AssistantRunMetadata:
         )
         if any(not value.strip() for value in required_strings):
             raise ArtifactError("run metadata contains an empty required field")
-        if self.capability_profile != CAPABILITY_PROFILE:
+        if self.capability_profile not in CAPABILITY_PROFILES or (
+            self.capability_profile == INTERPLEX_CAPABILITY_PROFILE and self.comparable
+        ):
             raise ArtifactError("run metadata has an unexpected capability profile")
         if self.requested_reasoning not in _REASONING_EFFORTS:
             raise ArtifactError("run metadata has invalid requested reasoning")
@@ -436,7 +453,9 @@ class AssistantRunMetadata:
         if self.classification not in _TERMINAL_OUTCOMES:
             raise ArtifactError("run metadata has invalid classification")
         if self.telemetry_scope_warning is not None and (
-            self.comparable or self.telemetry_scope_warning not in {
+            self.comparable
+            or self.telemetry_scope_warning
+            not in {
                 "Assistant tool trace queried telemetry before the provided time window",
                 "Assistant tool trace queried telemetry after the provided time window",
             }
@@ -488,7 +507,8 @@ class AssistantRunMetadata:
             "classification": classification,
             **(
                 {"telemetry_scope_warning": self.telemetry_scope_warning}
-                if self.telemetry_scope_warning is not None else {}
+                if self.telemetry_scope_warning is not None
+                else {}
             ),
             "included_in_diagnosis_pass_rate": classification
             not in {"infrastructure_invalid", "telemetry_scope_violation"},
@@ -988,6 +1008,14 @@ def execute_assistant_attempt(
                     "connection_id": connection_id,
                     "index": config.hec_index,
                 }
+        if config.capability_profile != assistant.configuration.capability_profile:
+            raise ConductorError("Driver and client capability profiles must match")
+        if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE:
+            # Current receivers ignore incident_scope. This pilot carries public
+            # selectors in instructions and audits calls; it is not isolation proof.
+            if incident_scope is None:
+                raise ConductorError("Interplex pilot requires an explicit incident scope")
+            action_instructions += interplex_pilot_action_suffix(incident_scope)
         # Selector enforcement belongs to the compatible receiver required by
         # the session contract. Retain the request and native calls for audit;
         # a completed stream alone is not a scope-capability acknowledgement.
@@ -1122,7 +1150,13 @@ def execute_assistant_attempt(
         requested_reasoning=assistant.configuration.reasoning,
         action_instructions=action_instructions,
         incident_scope=incident_scope,
-        action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
+        action_profile_id=(
+            "sregym-interplex-live-pilot-v1"
+            if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE
+            else "sregym-symptom-window-v1"
+            if config.symptom is not None
+            else None
+        ),
     )
     metadata = AssistantRunMetadata(
         run_id=config.run_id,
@@ -1131,7 +1165,7 @@ def execute_assistant_attempt(
         agent_version=config.agent_version,
         benchmark_profile=config.benchmark_profile,
         comparable=config.comparable,
-        capability_profile=CAPABILITY_PROFILE,
+        capability_profile=config.capability_profile,
         requested_model=assistant.configuration.model,
         resolved_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
@@ -1225,7 +1259,7 @@ def write_pre_agent_failure(
         agent_version=config.agent_version,
         benchmark_profile=config.benchmark_profile,
         comparable=config.comparable,
-        capability_profile=CAPABILITY_PROFILE,
+        capability_profile=config.capability_profile,
         requested_model=assistant_configuration.model,
         resolved_model=None,
         requested_reasoning=assistant_configuration.reasoning,
@@ -1254,7 +1288,13 @@ def write_pre_agent_failure(
                 prompt=rendered,
                 requested_model=assistant_configuration.model,
                 requested_reasoning=assistant_configuration.reasoning,
-                action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
+                action_profile_id=(
+                    "sregym-interplex-live-pilot-v1"
+                    if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE
+                    else "sregym-symptom-window-v1"
+                    if config.symptom is not None
+                    else None
+                ),
             ),
             events=(),
             terminal=terminal,

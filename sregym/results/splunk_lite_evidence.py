@@ -18,6 +18,8 @@ from typing import Protocol
 
 import yaml
 
+from clients.assistant_v3.client import INTERPLEX_CAPABILITY_PROFILE, interplex_pilot_action_suffix
+from clients.assistant_v3.driver import _build_action_instructions
 from sregym.conductor.problem_sets import SREGYM_LITE_PROBLEMS
 from sregym.observability.base import ApplicationScope, AttemptContext, SignalName, validate_cluster_name
 from sregym.observability.splunk import SIGNALFLOW_INGESTION_LAG, SplunkConfig, SplunkHttpBackend
@@ -43,13 +45,23 @@ class EvidenceError(ValueError):
 
 class EvidenceBackend(Protocol):
     def query_signal(
-        self, signal: SignalName, context: AttemptContext, scope: ApplicationScope,
-        connection_id: str, checked_at: datetime, timeout_seconds: float,
+        self,
+        signal: SignalName,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
     ) -> int: ...
 
     def query_object(
-        self, kind: str, context: AttemptContext, scope: ApplicationScope,
-        connection_id: str, checked_at: datetime, timeout_seconds: float,
+        self,
+        kind: str,
+        context: AttemptContext,
+        scope: ApplicationScope,
+        connection_id: str,
+        checked_at: datetime,
+        timeout_seconds: float,
     ) -> int: ...
 
 
@@ -103,11 +115,16 @@ def verify_case_delivery(
     if not isinstance(instructions, str):
         raise EvidenceError("attempt has no exact incident window")
     action_profile = request.get("action_profile_id")
+    interplex_pilot = action_profile == "sregym-interplex-live-pilot-v1"
+    if interplex_pilot != (metadata.get("capability_profile") == INTERPLEX_CAPABILITY_PROFILE):
+        raise EvidenceError("Interplex action and capability profiles must match")
+    if interplex_pilot and metadata.get("comparable") is not False:
+        raise EvidenceError("Interplex pilot cannot be benchmark-comparable")
     if action_profile == "sregym-symptom-window-v1":
         symptom = load_prompt_recipe(case_id).symptom
         if not instructions.endswith(f"\nObserved symptom: {symptom}") or instructions.count("Observed symptom:") != 1:
             raise EvidenceError("attempt does not contain the exact reviewed symptom")
-    elif action_profile is not None or "Observed symptom:" in instructions:
+    elif not interplex_pilot and (action_profile is not None or "Observed symptom:" in instructions):
         raise EvidenceError("attempt has an unapproved symptom profile")
     match = _WINDOW.search(instructions)
     if match is None:
@@ -119,7 +136,7 @@ def verify_case_delivery(
     run_id = metadata.get("run_id")
     if not isinstance(run_id, str):
         raise EvidenceError("attempt has no opaque run identity")
-    if run_id in str(request.get("prompt", "")) or run_id in instructions:
+    if run_id in str(request.get("prompt", "")) or (run_id in instructions and not interplex_pilot):
         raise EvidenceError("opaque run identity leaked into Assistant instructions")
     app_id = prompt_recipe["application"]
     app = _json_object(METADATA_ROOT / _METADATA_FILE[app_id])
@@ -134,8 +151,31 @@ def verify_case_delivery(
         validate_cluster_name(cluster_name)
     except ValueError:
         raise EvidenceError("attempt has an invalid cluster identity") from None
+    if interplex_pilot:
+        expected_scope = {
+            "environment": run_id,
+            "cluster": cluster_name,
+            "namespace": namespace,
+            "start_ms": int(start.timestamp() * 1000),
+            "end_ms": int(end.timestamp() * 1000),
+        }
+        if metadata.get("hec_index"):
+            expected_scope["logs_source"] = {
+                "connection_id": expected_connection,
+                "index": metadata["hec_index"],
+            }
+        if request.get("incident_scope") != expected_scope:
+            raise EvidenceError("Interplex pilot target selectors differ from saved attempt")
+        expected_instructions = _build_action_instructions(
+            start, end, symptom=load_prompt_recipe(case_id).symptom
+        ) + interplex_pilot_action_suffix(expected_scope)
+        if instructions != expected_instructions:
+            raise EvidenceError("Interplex pilot instructions differ from the reviewed public scope and symptom")
     context = AttemptContext(
-        run_id, str(metadata.get("benchmark_profile")), bool(metadata.get("comparable")), start,
+        run_id,
+        str(metadata.get("benchmark_profile")),
+        bool(metadata.get("comparable")),
+        start,
         cluster_name=cluster_name,
     )
     scope = ApplicationScope(app_name=str(app["Name"]), namespaces=(namespace,))
@@ -151,7 +191,9 @@ def verify_case_delivery(
                     # Offset only metrics so its actual query stops at the saved
                     # incident end, not two minutes before a short incident began.
                     query_end = end + SIGNALFLOW_INGESTION_LAG if signal == "metrics" else end
-                    count = backend.query_signal(signal, context, scope, expected_connection, query_end, timeout_seconds)
+                    count = backend.query_signal(
+                        signal, context, scope, expected_connection, query_end, timeout_seconds
+                    )
             except Exception:  # Backend details may contain credentials or telemetry payloads.
                 checks[signal] = {"status": "query_error", "count": None}
             else:
@@ -192,7 +234,8 @@ def main() -> int:
     backend = SplunkHttpBackend(configuration)
     try:
         path = verify_case_delivery(
-            arguments.run_dir, backend=backend,
+            arguments.run_dir,
+            backend=backend,
             expected_connection=configuration.logs_connection_id,
         )
     finally:

@@ -11,6 +11,8 @@ from clients.assistant_v3.driver import ArtifactError, ConductorClient, DriverRu
 
 
 def write_native_configuration(monkeypatch, tmp_path, *, selected, index, resolved=None, cluster_name=None):
+    # Exercise the default independently of the developer's private pilot env.
+    monkeypatch.delenv("ASSISTANT_V3_CAPABILITY_PROFILE", raising=False)
     monkeypatch.setattr(benchmark_main, "get_profile", lambda: "svelte")
     monkeypatch.setenv("JUDGE_MODEL_ID", "fixed-judge")
     start = datetime(2026, 10, 1, 12, tzinfo=UTC)
