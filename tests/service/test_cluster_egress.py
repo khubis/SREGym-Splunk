@@ -107,7 +107,8 @@ def test_boundary_creates_cluster_wide_deny_then_pass_policy():
     assert custom_api.deleted == [(POLICY_PLURAL, POLICY_NAME)]
 
 
-def test_dns_exception_precedes_external_deny_and_preserves_lower_tier_policies():
+def test_dns_exception_precedes_external_deny_and_preserves_lower_tier_policies(monkeypatch):
+    monkeypatch.delenv("ASSISTANT_V3_CAPABILITY_PROFILE", raising=False)
     boundary = ClusterEgressBoundary(SimpleNamespace(), custom_api=FakeCustomObjectsAPI(), core_api=FakeCoreAPI())
     rules = boundary._policy_body(["10.244.0.0/16", "fd00:10:244::/56"])["spec"]["egress"]
 
@@ -177,3 +178,23 @@ def test_boundary_fails_closed_when_service_subnet_is_unknown():
 
     with pytest.raises(RuntimeError, match="Service subnet"):
         boundary.start()
+
+
+def test_interplex_pilot_only_preserves_labeled_connector_https_egress(monkeypatch):
+    from sregym.service.cluster_egress import INTERPLEX_CONNECTOR_SELECTOR
+
+    monkeypatch.setenv("ASSISTANT_V3_CAPABILITY_PROFILE", "splunk_o11y_read_only_interplex_pilot")
+    boundary = ClusterEgressBoundary(SimpleNamespace(), custom_api=FakeCustomObjectsAPI(), core_api=FakeCoreAPI())
+    rules = boundary._policy_body(["10.244.0.0/16"])["spec"]["egress"]
+    connector = rules[5]
+    assert connector == {
+        "action": "Pass",
+        "protocol": "TCP",
+        "source": {"selector": INTERPLEX_CONNECTOR_SELECTOR},
+        "destination": {"ports": [443]},
+    }
+    assert "sregym-context-connector" in INTERPLEX_CONNECTOR_SELECTOR
+    assert "app.kubernetes.io/instance == 'k8s-context-connector'" in INTERPLEX_CONNECTOR_SELECTOR
+    assert rules[6]["action"] == "Deny"
+    monkeypatch.delenv("ASSISTANT_V3_CAPABILITY_PROFILE")
+    assert connector not in boundary._policy_body(["10.244.0.0/16"])["spec"]["egress"]

@@ -155,6 +155,7 @@ def test_assistant_campaign_accepts_lite_suite_and_each_registered_lite_case():
 def test_assistant_runtime_environment_is_minimal_and_excludes_provider_and_judge_secrets(monkeypatch):
     benchmark_main = _load_main_module()
     values = {
+        "ASSISTANT_V3_CAPABILITY_PROFILE": "splunk_o11y_read_only_interplex_pilot",
         "ASSISTANT_V3_URL": "https://assistant.example.test",
         "ASSISTANT_V3_AUTH_TOKEN": "assistant-secret",
         "SF_TOKEN": "sf-secret",
@@ -170,6 +171,7 @@ def test_assistant_runtime_environment_is_minimal_and_excludes_provider_and_judg
     environment = benchmark_main._assistant_runtime_environment()
 
     assert set(environment) == {
+        "ASSISTANT_V3_CAPABILITY_PROFILE",
         "ASSISTANT_V3_URL",
         "ASSISTANT_V3_AUTH_TOKEN",
         "SF_TOKEN",
@@ -1002,6 +1004,7 @@ def test_case_preflight_redacts_unexpected_backend_errors_and_closes_backend(mon
 def test_assistant_preflight_forwards_only_assistant_credentials(monkeypatch):
     benchmark_main = _load_main_module()
     expected = {
+        "ASSISTANT_V3_CAPABILITY_PROFILE": "splunk_o11y_read_only_interplex_pilot",
         "ASSISTANT_V3_URL": "https://assistant.example.test",
         "ASSISTANT_V3_AUTH_TOKEN": "assistant-token",
         "SF_TOKEN": "splunk-token",
