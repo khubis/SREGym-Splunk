@@ -6,6 +6,7 @@
 [![Installation](https://img.shields.io/badge/%F0%9F%93%A6-Installation-blue?style=flat-square)](#📦installation)
 [![Quick Start](https://img.shields.io/badge/%F0%9F%9A%80-Quick%20Start-blue?style=flat-square)](#🚀quickstart)
 [Splunk Lite setup](#splunk-adapted-assistant-v3-lite-pilot-this-fork)
+[External diagnosis adapter](./clients/external_agent/README.md)
 [![Usage](https://img.shields.io/badge/%E2%9A%99%EF%B8%8F-Usage-blue?style=flat-square)](#⚙️usage)
 [![Contributing](https://img.shields.io/badge/%F0%9F%A4%9D-Contributing-blue?style=flat-square)](./CONTRIBUTING.md)
 [![Docs](https://img.shields.io/badge/%F0%9F%93%96-Docs-blue?style=flat-square)](https://sregym.com/docs)
