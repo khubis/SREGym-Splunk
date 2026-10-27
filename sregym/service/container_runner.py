@@ -105,7 +105,7 @@ class ExecInput:
 
 @dataclass
 class ContainerConfig:
-    image: str = DEFAULT_AGENT_IMAGE
+    image: str = field(default_factory=lambda: os.environ.get("SREGYM_AGENT_IMAGE") or DEFAULT_AGENT_IMAGE)
     network_mode: str = "host"
     kubeconfig_path: Path | None = None
     kubernetes_access: bool = True
@@ -323,9 +323,7 @@ class ContainerRunner:
             rules.add(EndpointRule("host.docker.internal", self.config.k8s_proxy_port, inspect_tools=False))
         if self.config.sregym_mcp_access:
             rules.add(
-                EndpointRule(
-                    "host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False
-                )
+                EndpointRule("host.docker.internal", int(env_vars.get("MCP_SERVER_PORT", "9954")), inspect_tools=False)
             )
         if (self.config.internet_policy.agent_name or "").casefold() == "assistant_v3":
             assistant_url = env_vars.get("ASSISTANT_V3_URL", "").strip()
@@ -484,6 +482,9 @@ class ContainerRunner:
 
         if extra_env:
             env_vars.update(extra_env)
+
+        if self.config.internet_policy.agent_name == "codex" and env_vars.get("AGENT_API_BASE"):
+            env_vars.setdefault("CODEX_HOME", "/logs")
 
         if not self.config.kubernetes_access:
             env_vars.pop("KUBECONFIG", None)

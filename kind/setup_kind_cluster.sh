@@ -21,7 +21,7 @@ case "${1:-auto}" in
         ;;
 esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KIND_CONFIG="${SCRIPT_DIR}/kind-config.yaml"
+KIND_CONFIG="${KIND_CONFIG:-${SCRIPT_DIR}/kind-config.yaml}"
 
 if [[ ! -f "${KIND_CONFIG}" ]]; then
     echo "❌ Config file not found: ${KIND_CONFIG}"
@@ -30,10 +30,43 @@ if [[ ! -f "${KIND_CONFIG}" ]]; then
 fi
 
 echo "==> Step 1: Create Kind cluster"
-kind create cluster --config "${KIND_CONFIG}"
+CREATE_ARGS=(--config "${KIND_CONFIG}")
+if [[ -n ${KIND_NODE_IMAGE:-} ]]; then
+    CREATE_ARGS+=(--image "${KIND_NODE_IMAGE}")
+fi
+if [[ ${KIND_RETAIN_ON_FAILURE:-false} == true ]]; then
+    CREATE_ARGS+=(--retain)
+fi
+kind create cluster "${CREATE_ARGS[@]}"
+
+echo "==> Step 1b: Drop host DNS search domains from the nodes"
+# Docker copies the host's "search" list into each node's /etc/resolv.conf and
+# kubelet appends it to every pod's search list. With ndots:5 a short name such
+# as "frontend" whose AAAA lookup has no cluster answer then walks the host
+# domains. On hosts whose search domains contain a real "frontend" (for example
+# corporate networks) Envoy in astronomy-shop's frontend-proxy resolves that
+# foreign address and every request fails with 503. Pods only need the cluster
+# search domains, which kubelet adds on its own.
+CONTAINER_CLI="${KIND_EXPERIMENTAL_PROVIDER:-docker}"
+for node in $(kind get nodes 2>/dev/null); do
+    # /etc/resolv.conf is a bind mount: rewrite the content, not the inode.
+    "${CONTAINER_CLI}" exec "${node}" sh -c \
+        'awk "!/^search /" /etc/resolv.conf > /tmp/resolv.conf.sregym && cat /tmp/resolv.conf.sregym > /etc/resolv.conf'
+done
 
 echo "==> Step 2: Install Calico CNI"
-kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+# Cold parallel starts can briefly overload etcd while node images unpack.
+# Apply is declarative, so retrying also handles a partially applied manifest.
+for attempt in 1 2 3; do
+    if kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"; then
+        break
+    fi
+    if [[ $attempt == 3 ]]; then
+        echo "Calico installation failed after ${attempt} attempts." >&2
+        exit 1
+    fi
+    sleep 5
+done
 
 echo "==> Step 3: Wait for Calico to be ready"
 # 300s (vs 120s) accommodates first-time image pulls on slow CI runners,

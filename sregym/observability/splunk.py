@@ -32,6 +32,7 @@ from sregym.observability.base import (
     ReadinessReport,
     SignalName,
     SignalReadiness,
+    validate_cluster_name,
 )
 
 CHART_VERSION = "0.160.0"
@@ -148,11 +149,49 @@ class SplunkBackendError(RuntimeError):
         status_code: int | None,
         transient: bool,
         retry_after_seconds: float | None = None,
+        diagnostic: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__("Splunk query request failed")
         self.status_code = status_code
         self.transient = transient
         self.retry_after_seconds = retry_after_seconds
+        self._diagnostic: dict[str, str | float] = {}
+        if diagnostic:
+            operation = diagnostic.get("operation")
+            error_kind = diagnostic.get("error_kind")
+            if isinstance(operation, str) and operation in {
+                "getConnections",
+                "createSearchJob",
+                "searchJobsById",
+                "searchJobResultsWithoutFieldsSummary",
+                "StartAnalyticsSearch",
+                "GetAnalyticsSearch",
+                "signalflow_execute",
+            }:
+                self._diagnostic["operation"] = operation
+            if isinstance(error_kind, str) and error_kind in {
+                "ConnectTimeout",
+                "ReadTimeout",
+                "ConnectError",
+                "ReadError",
+                "HTTPStatusError",
+                "GraphQLError",
+                "InvalidResponse",
+            }:
+                self._diagnostic["error_kind"] = error_kind
+            timeout = diagnostic.get("request_timeout_seconds")
+            if (
+                isinstance(timeout, int | float)
+                and not isinstance(timeout, bool)
+                and math.isfinite(timeout)
+                and timeout > 0
+            ):
+                self._diagnostic["request_timeout_seconds"] = float(timeout)
+
+    @property
+    def diagnostic(self) -> dict[str, str | float]:
+        """Only static operation/error identifiers and a numeric request budget."""
+        return self._diagnostic.copy()
 
 
 class SplunkQueryBackend(Protocol):
@@ -270,12 +309,11 @@ class SplunkHttpBackend:
                 f"filter('k8s.namespace.name', '{namespace}')" for namespace in scope.namespaces
             )
             kubernetes_filter = (
-                f"filter('k8s.cluster.name', '{context.run_id}') and "
-                f"filter('sregym.run.id', '{context.run_id}') and "
+                f"{self._metric_identity_filter(context)} and "
                 f"({kubernetes_namespaces})"
             )
             application_filter = (
-                f"filter('sregym.run.id', '{context.run_id}') and "
+                f"{self._metric_identity_filter(context)} and "
                 "filter('sregym.metric.source', 'sregym_prometheus_application') and "
                 f"({application_namespaces})"
             )
@@ -332,7 +370,7 @@ class SplunkHttpBackend:
             raise ValueError("invalid application metric names")
         namespaces = " or ".join(f"filter('namespace', '{namespace}')" for namespace in scope.namespaces)
         scope_filter = (
-            f"filter('sregym.run.id', '{context.run_id}') and "
+            f"{self._metric_identity_filter(context)} and "
             "filter('sregym.metric.source', 'sregym_prometheus_application') and "
             f"({namespaces})"
         )
@@ -370,13 +408,13 @@ class SplunkHttpBackend:
             "enqueue_logs": "otelcol_exporter_enqueue_failed_log_records",
         }
         statements = [
-            f"data('{metric}', filter=filter('sregym.run.id', '{context.run_id}'), rollup='latest').max().publish(label='{label}')"
+            f"data('{metric}', filter={self._metric_identity_filter(context)}, rollup='latest').max().publish(label='{label}')"
             for label, metric in labels.items()
         ]
         for data_type in ("metrics", "traces", "logs"):
             statements.append(
-                "data('otelcol_exporter_queue_size', filter=filter('sregym.run.id', "
-                f"'{context.run_id}') and filter('data_type', '{data_type}'), rollup='latest')"
+                "data('otelcol_exporter_queue_size', filter="
+                f"{self._metric_identity_filter(context)} and filter('data_type', '{data_type}'), rollup='latest')"
                 f".max().publish(label='queue_{data_type}')"
             )
         values = self._signalflow("\n".join(statements), context.attempt_started_at, checked_at, timeout_seconds)
@@ -421,8 +459,8 @@ class SplunkHttpBackend:
         drained. Only the post-stop, ingestion-complete interval is eligible.
         """
         statements = [
-            "data('otelcol_exporter_queue_size', filter=filter('sregym.run.id', "
-            f"'{context.run_id}') and filter('data_type', '{data_type}'), rollup='min')"
+            "data('otelcol_exporter_queue_size', filter="
+            f"{self._metric_identity_filter(context)} and filter('data_type', '{data_type}'), rollup='min')"
             f".max().publish(label='queue_min_{data_type}')"
             for data_type in ("metrics", "traces", "logs")
         ]
@@ -455,7 +493,7 @@ class SplunkHttpBackend:
         )
         search_index = self.configuration.hec_index or "*"
         query = (
-            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
+            f'search index="{search_index}" {self._log_identity_filter(context)} '
             f"({namespaces}) {kind} | head 1"
         )
         return self._search_log_rows(
@@ -477,7 +515,7 @@ class SplunkHttpBackend:
         namespaces = " OR ".join(f'k8s.namespace.name="{namespace}"' for namespace in scope.namespaces)
         search_index = self.configuration.hec_index or "*"
         query = (
-            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
+            f'search index="{search_index}" {self._log_identity_filter(context)} '
             f'({namespaces}) sourcetype="kube:object:{kind}" | head 1'
         )
         return self._search_log_rows(
@@ -523,13 +561,27 @@ class SplunkHttpBackend:
         search_index = self.configuration.hec_index or "*"
         term_filter = " ".join(f'"{term}"' for term in terms)
         query = (
-            f'search index="{search_index}" k8s.cluster.name="{context.run_id}" '
+            f'search index="{search_index}" {self._log_identity_filter(context)} '
             f"({namespaces}) {selector} {term_filter} | head {limit}"
         )
         return self._search_log_examples(
             query, (context.run_id, f"examples:{kind}:{container_name}:{limit}:{':'.join(terms)}"), context,
             connection_id, checked_at, timeout_seconds, limit=limit,
         )
+
+    def _metric_identity_filter(self, context: AttemptContext) -> str:
+        return (
+            f"filter('k8s.cluster.name', '{self.configuration.cluster_name_for(context)}') and "
+            f"filter('sregym.run.id', '{context.run_id}')"
+        )
+
+    def _log_identity_filter(self, context: AttemptContext) -> str:
+        cluster_name = self.configuration.cluster_name_for(context)
+        scope = f'k8s.cluster.name="{cluster_name}"'
+        # Saved pre-stable-name attempts retain their original query contract.
+        if cluster_name != context.run_id:
+            scope += f' sregym.run.id="{context.run_id}"'
+        return scope
 
     def _search_log_rows(
         self,
@@ -635,7 +687,14 @@ class SplunkHttpBackend:
                 raise
             field = "getAnalyticsSearch"
         else:
-            tags = [{"tag": "k8s.cluster.name", "operation": "IN", "values": [context.run_id]}]
+            cluster_name = self.configuration.cluster_name_for(context)
+            tags = [{"tag": "k8s.cluster.name", "operation": "IN", "values": [cluster_name]}]
+            # The existing deployment.environment resource attribute maps to
+            # this standard APM filter; no new custom span-tag index is needed.
+            trace_tags = (
+                [{"tag": "sf_environment", "operation": "IN", "values": [context.run_id]}]
+                if cluster_name != context.run_id else []
+            )
             parameters = {
                 "sharedParameters": {
                     "timeRangeMillis": {
@@ -645,7 +704,7 @@ class SplunkHttpBackend:
                     "filters": [
                         {
                             "filterType": "traceFilter",
-                            "traceFilter": {"tags": []},
+                            "traceFilter": {"tags": trace_tags},
                             "spanFilters": [{"tags": tags}],
                         }
                     ],
@@ -771,8 +830,20 @@ class SplunkHttpBackend:
                 content=content,
                 params=query_params,
             )
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError):
-            raise SplunkBackendError(status_code=None, transient=True) from None
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError) as error:
+            raise SplunkBackendError(
+                status_code=None,
+                transient=True,
+                diagnostic={
+                    "operation": "signalflow_execute"
+                    if url == f"{self._stream_base}/v2/signalflow/execute"
+                    else json_body.get("operationName")
+                    if isinstance(json_body, dict)
+                    else None,
+                    "error_kind": type(error).__name__,
+                    "request_timeout_seconds": timeout_seconds,
+                },
+            ) from None
         if response.is_error:
             retry_after = _retry_after(response.headers.get("Retry-After"))
             transient = response.status_code in (408, 429) or response.status_code >= 500
@@ -780,6 +851,15 @@ class SplunkHttpBackend:
                 status_code=response.status_code,
                 transient=transient,
                 retry_after_seconds=retry_after,
+                diagnostic={
+                    "operation": "signalflow_execute"
+                    if url == f"{self._stream_base}/v2/signalflow/execute"
+                    else json_body.get("operationName")
+                    if isinstance(json_body, dict)
+                    else None,
+                    "error_kind": "HTTPStatusError",
+                    "request_timeout_seconds": timeout_seconds,
+                },
             )
         return response
 
@@ -858,6 +938,18 @@ class SplunkConfig:
     hec_token: str = field(repr=False)
     hec_index: str | None = None
     logs_connection_id: str | None = None
+    cluster_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.cluster_name is not None:
+            try:
+                validate_cluster_name(self.cluster_name)
+            except ValueError:
+                raise ProviderError("configuration", "SPLUNK_CLUSTER_NAME must be a valid literal cluster name") from None
+
+    def cluster_name_for(self, context: AttemptContext) -> str:
+        """Honor saved evidence scope before current config; preserve legacy runs."""
+        return context.cluster_name or self.cluster_name or context.run_id
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> "SplunkConfig":
@@ -894,6 +986,7 @@ class SplunkConfig:
             hec_token=source["SPLUNK_HEC_TOKEN"].strip(),
             hec_index=index,
             logs_connection_id=logs_connection_id,
+            cluster_name=source.get("SPLUNK_CLUSTER_NAME"),
         )
 
     @property
@@ -907,10 +1000,11 @@ class SplunkConfig:
             "hec_index": self.hec_index or "*",
             "hec_port": self.hec_port,
             "realm": self.realm,
+            **({"cluster_name": self.cluster_name} if self.cluster_name is not None else {}),
         }
 
 
-def _gateway_telemetry_resource_attributes(run_id: str) -> list[dict[str, str]]:
+def _gateway_telemetry_resource_attributes(run_id: str, cluster_name: str) -> list[dict[str, str]]:
     """Preserve chart defaults and scope gateway exporter counters to one attempt."""
     return [
         {"name": "service.name", "value": "otel-collector"},
@@ -919,7 +1013,7 @@ def _gateway_telemetry_resource_attributes(run_id: str) -> list[dict[str, str]]:
         {"name": "k8s.pod.name", "value": "${K8S_POD_NAME}"},
         {"name": "k8s.pod.uid", "value": "${K8S_POD_UID}"},
         {"name": "k8s.namespace.name", "value": "${K8S_NAMESPACE}"},
-        {"name": "k8s.cluster.name", "value": run_id},
+        {"name": "k8s.cluster.name", "value": cluster_name},
         {"name": "sregym.run.id", "value": run_id},
         {"name": "deployment.environment", "value": run_id},
         {"name": "deployment.environment.name", "value": run_id},
@@ -999,8 +1093,9 @@ class SplunkObservabilityProvider:
         self._touched = True
         self._ensure_namespace()
         self._upsert_secret()
+        cluster_name = self.configuration.cluster_name_for(context)
         runtime_values = {
-            "clusterName": context.run_id,
+            "clusterName": cluster_name,
             "extraAttributes": {
                 "custom": [
                     {"name": "sregym.run.id", "value": context.run_id},
@@ -1012,7 +1107,7 @@ class SplunkObservabilityProvider:
                 "config": {
                     "service": {
                         "telemetry": {
-                            "resource": {"attributes": _gateway_telemetry_resource_attributes(context.run_id)}
+                            "resource": {"attributes": _gateway_telemetry_resource_attributes(context.run_id, cluster_name)}
                         }
                     }
                 }
@@ -1085,6 +1180,7 @@ class SplunkObservabilityProvider:
             endpoint=f"{RELEASE_NAME}.{NAMESPACE}.svc.cluster.local:4317",
             run_id=context.run_id,
             resource_attributes={
+                "k8s.cluster.name": cluster_name,
                 "deployment.environment": context.run_id,
                 "deployment.environment.name": context.run_id,
                 "sregym.run.id": context.run_id,
@@ -1574,6 +1670,8 @@ class SplunkObservabilityProvider:
                     retry if type(retry) in (int, float) and math.isfinite(retry) and 0 <= retry <= 3600 else None
                 ),
             )
+            if error.diagnostic:
+                row["backend"] = error.diagnostic
         # Never copy exception text, response bodies, request headers or credentials.
         observations.append(row)
 

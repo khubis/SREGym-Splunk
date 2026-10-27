@@ -227,11 +227,16 @@ def test_scorecard_links_separate_run_scoped_delivery_proof(tmp_path: Path) -> N
     assert json.loads(ledger[0])["delivery_proof_sha256"]
 
 
-def test_guided_attempt_requires_ready_pre_agent_proof_and_links_exact_prompt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("action_profile", ["sregym-symptom-window-v1", "sregym-interplex-live-pilot-v1"])
+def test_guided_attempt_requires_ready_pre_agent_proof_and_links_exact_prompt(tmp_path: Path, action_profile) -> None:
     batch, run = _materialize_run(tmp_path)
+    if action_profile == "sregym-interplex-live-pilot-v1":
+        metadata = json.loads((run / "run_metadata.json").read_text())
+        metadata["capability_profile"] = "splunk_o11y_read_only_interplex_pilot"
+        _write_json(run / "run_metadata.json", metadata)
     request_path = run / "assistant_v3" / "request.json"
     request = json.loads(request_path.read_text())
-    request["action_profile_id"] = "sregym-symptom-window-v1"
+    request["action_profile_id"] = action_profile
     request_path.write_text(json.dumps(request))
     with pytest.raises(CampaignArtifactError, match="pre-agent evidence"):
         checkpoint_attempt(batch, run)

@@ -1,0 +1,1 @@
+These four prompt/oracle recipes belong to the historical 21-case Lite suite. Upstream SREGym 1.1 retired them from its active Lite registry; they are retained here for interpreting historical results and are not scheduled by the current 17-case wrapper.

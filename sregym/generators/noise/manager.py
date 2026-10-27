@@ -8,6 +8,7 @@ intercepting tool responses.
 
 import contextlib
 import copy
+import json
 import logging
 import os
 import random
@@ -30,6 +31,7 @@ CHAOS_NAMESPACE = "chaos-mesh"
 MAX_CONCURRENT = 2  # experiments per injection cycle
 DURATION = 120  # seconds each experiment lives
 COOLDOWN = 300  # seconds between injection cycles
+STOP_TIMEOUT = 30  # seconds to wait for outstanding noise work
 
 
 class NoiseManager:
@@ -56,6 +58,8 @@ class NoiseManager:
         self._background_thread: threading.Thread | None = None
         self._last_injection_time: float = 0
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._chaos_mesh_ready = False
 
     # ── Context from Conductor ────────────────────────────────────────
@@ -72,39 +76,54 @@ class NoiseManager:
 
     def start(self):
         """Start the background noise injection loop."""
-        if self.running:
-            return
-        self._ensure_chaos_mesh_installed()
-        if not self._chaos_mesh_ready:
-            logger.warning("Chaos Mesh is not ready; noise will not be injected.")
-            return
-        self.running = True
-        self._background_thread = threading.Thread(target=self._background_loop, daemon=True)
-        self._background_thread.start()
-        logger.info("Noise injection started.")
+        with self._lifecycle_lock:
+            if self.running:
+                return
+            if self._background_thread is not None:
+                raise RuntimeError("Previous noise worker must be stopped before restarting noise")
+            self._stop_event.clear()
+            self._ensure_chaos_mesh_installed()
+            if self._stop_event.is_set():
+                return
+            if not self._chaos_mesh_ready:
+                logger.warning("Chaos Mesh is not ready; noise will not be injected.")
+                return
+            self.running = True
+            self._background_thread = threading.Thread(target=self._background_loop, daemon=True)
+            self._background_thread.start()
+            logger.info("Noise injection started.")
 
     def stop(self):
-        """Stop the background loop and clean up all active experiments."""
-        self.running = False
-        if self._background_thread:
-            self._background_thread.join(timeout=5)
+        """Stop injection before cleanup, raising if the worker cannot stop in time."""
+        # Cancel a startup that may still hold the lifecycle lock.
+        self._stop_event.set()
+        if not self._lifecycle_lock.acquire(timeout=STOP_TIMEOUT):
+            raise TimeoutError(f"Noise lifecycle operation did not finish within {STOP_TIMEOUT}s")
+        try:
+            self.running = False
+            self._stop_event.set()
+            if self._background_thread:
+                self._background_thread.join(timeout=STOP_TIMEOUT)
+                if self._background_thread.is_alive():
+                    raise TimeoutError(f"Noise injection did not stop within {STOP_TIMEOUT}s")
+            self._cleanup_experiments()
+            # Strip finalizers so reconciliation can remove the chaos namespace.
+            self._force_remove_all_chaos_resources()
             self._background_thread = None
-        self._cleanup_experiments()
-        # Strip finalizers from any remaining chaos-mesh CRs so the namespace
-        # can terminate cleanly when reconcile_to_baseline deletes it.
-        self._force_remove_all_chaos_resources()
-        self._last_injection_time = 0
-        logger.info("Noise injection stopped.")
+            self._last_injection_time = 0
+            logger.info("Noise injection stopped.")
+        finally:
+            self._lifecycle_lock.release()
 
     # ── Background loop ───────────────────────────────────────────────
 
     def _background_loop(self):
-        while self.running:
+        while not self._stop_event.is_set():
             try:
                 self._maybe_inject()
             except Exception as e:
                 logger.error(f"Error in noise background loop: {e}")
-            time.sleep(5)
+            self._stop_event.wait(5)
 
     def _maybe_inject(self):
         if not self.target_namespace:
@@ -118,6 +137,8 @@ class NoiseManager:
         selected = random.sample(EXPERIMENT_CATALOG, n)
 
         for template in selected:
+            if self._stop_event.is_set():
+                break
             self._apply_experiment(template)
 
         self._last_injection_time = now
@@ -248,22 +269,94 @@ class NoiseManager:
 
     # ── Chaos Mesh installation ───────────────────────────────────────
 
+    def wait_for_chaos_mesh_ready(self):
+        """Reconcile existing installs and require a ready daemon on every Linux node."""
+        timeout = 180
+        self._reconcile_daemon_tolerations()
+        for workload in ("deployment/chaos-controller-manager", "daemonset/chaos-daemon"):
+            self.kubectl.exec_command_checked(
+                f"kubectl rollout status {workload} -n {CHAOS_NAMESPACE} --timeout={timeout}s",
+                timeout=timeout + 10,
+            )
+        self._wait_for_daemon_coverage(timeout)
+        self._chaos_mesh_ready = True
+
+    def _reconcile_daemon_tolerations(self):
+        """Allow the daemon on tainted workload nodes without replacing existing tolerations."""
+        daemon = json.loads(
+            self.kubectl.exec_command_checked(
+                f"kubectl get daemonset chaos-daemon -n {CHAOS_NAMESPACE} -o json", timeout=30
+            )
+        )
+        pod_spec = daemon["spec"]["template"]["spec"]
+        tolerations = pod_spec.get("tolerations") or []
+        if not any(t.get("operator") == "Exists" and not t.get("key") and not t.get("effect") for t in tolerations):
+            # Append rather than replace user tolerations. The version check prevents overwriting a concurrent edit.
+            path = "/spec/template/spec/tolerations"
+            patch = [
+                {"op": "test", "path": "/metadata/resourceVersion", "value": daemon["metadata"]["resourceVersion"]}
+            ]
+            if isinstance(pod_spec.get("tolerations"), list):
+                patch.append({"op": "add", "path": f"{path}/-", "value": {"operator": "Exists"}})
+            else:
+                patch.append({"op": "add", "path": path, "value": [{"operator": "Exists"}]})
+            self.kubectl.exec_command_checked(
+                f"kubectl patch daemonset chaos-daemon -n {CHAOS_NAMESPACE} --type=json -p {shlex.quote(json.dumps(patch))}",
+                timeout=30,
+            )
+
+    def _wait_for_daemon_coverage(self, timeout: int):
+        """Rollout status alone excludes nodes that the old DaemonSet could not schedule on."""
+        deadline = time.monotonic() + timeout
+        while True:
+            nodes = json.loads(self.kubectl.exec_command_checked("kubectl get nodes -o json", timeout=30))
+            required = {
+                node["metadata"]["name"]
+                for node in nodes["items"]
+                if node["metadata"].get("labels", {}).get("kubernetes.io/os") == "linux"
+                and not node["metadata"].get("deletionTimestamp")
+            }
+            endpoints = json.loads(
+                self.kubectl.exec_command_checked(
+                    f"kubectl get endpointslices -n {CHAOS_NAMESPACE} "
+                    "-l kubernetes.io/service-name=chaos-daemon -o json",
+                    timeout=30,
+                )
+            )
+            covered = {
+                endpoint["nodeName"]
+                for item in endpoints["items"]
+                for endpoint in item.get("endpoints", [])
+                if endpoint.get("nodeName")
+                and endpoint.get("addresses")
+                and endpoint.get("conditions", {}).get("ready") is not False
+            }
+            missing = required - covered
+            if required and not missing:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Chaos Mesh has no ready daemon endpoint on nodes: {sorted(missing) or 'no Linux nodes'}"
+                )
+            time.sleep(2)
+
     def _ensure_chaos_mesh_installed(self):
         """Check if Chaos Mesh is installed; install if missing."""
+        self._chaos_mesh_ready = False
         try:
             ns_check = self.kubectl.exec_command(f"kubectl get ns {CHAOS_NAMESPACE}")
             if "Active" in ns_check:
-                pods = self.kubectl.exec_command(
-                    f"kubectl get pods -n {CHAOS_NAMESPACE} -l app.kubernetes.io/component=controller-manager"
+                controller = self.kubectl.exec_command(
+                    f"kubectl get deployment chaos-controller-manager -n {CHAOS_NAMESPACE} -o name"
                 )
-                if "Running" in pods:
-                    self._chaos_mesh_ready = True
-                    logger.info("Chaos Mesh is already installed and running.")
+                if "deployment.apps/chaos-controller-manager" in controller:
+                    self.wait_for_chaos_mesh_ready()
+                    logger.info("Chaos Mesh is already installed and ready.")
                     return
 
             logger.info("Chaos Mesh not found. Installing...")
             self.kubectl.exec_command("helm repo add chaos-mesh https://charts.chaos-mesh.org")
-            self.kubectl.exec_command("helm repo update")
+            self.kubectl.exec_command("helm repo update chaos-mesh")
             self.kubectl.exec_command(f"kubectl create ns {CHAOS_NAMESPACE}")
 
             # Clean up orphaned CRDs if needed (strip finalizers first to avoid hanging)
@@ -300,16 +393,8 @@ class NoiseManager:
                 logger.error(f"Failed to install Chaos Mesh: {result}")
                 return
 
-            # Wait for readiness
-            for _ in range(30):
-                pods_status = self.kubectl.exec_command(f"kubectl get pods -n {CHAOS_NAMESPACE}")
-                if "Running" in pods_status and "0/1" not in pods_status and "ContainerCreating" not in pods_status:
-                    self._chaos_mesh_ready = True
-                    logger.info("Chaos Mesh installed successfully.")
-                    return
-                time.sleep(2)
-
-            logger.warning("Chaos Mesh installation timed out.")
+            self.wait_for_chaos_mesh_ready()
+            logger.info("Chaos Mesh installed successfully.")
         except Exception as e:
             logger.error(f"Error ensuring Chaos Mesh installation: {e}")
 

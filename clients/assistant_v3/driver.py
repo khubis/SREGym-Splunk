@@ -18,11 +18,24 @@ from uuid import UUID
 
 import httpx
 
-from clients.assistant_v3.client import AssistantEvent, AssistantV3Client, AssistantV3Config, AssistantV3Error
+from clients.assistant_v3.client import (
+    CAPABILITY_PROFILE,
+    CAPABILITY_PROFILES,
+    INTERPLEX_CAPABILITY_PROFILE,
+    AssistantEvent,
+    AssistantV3Client,
+    AssistantV3Config,
+    AssistantV3Error,
+    interplex_pilot_action_suffix,
+)
 from clients.assistant_v3.prompt import PromptProvenance, RenderedPrompt, render_prompt
-from sregym.observability.base import DeliveryReport, ReadinessReport, SignalReadiness, validate_run_id
-
-CAPABILITY_PROFILE = "splunk_o11y_read_only_no_direct_kubernetes"
+from sregym.observability.base import (
+    DeliveryReport,
+    ReadinessReport,
+    SignalReadiness,
+    validate_cluster_name,
+    validate_run_id,
+)
 
 TerminalOutcome = Literal[
     "completed",
@@ -99,6 +112,8 @@ class DriverRunConfig:
     telemetry_window_ended_at: datetime | None = None
     symptom: str | None = None
     resolved_logs_connection_id: str | None = None
+    cluster_name: str | None = None
+    capability_profile: str = CAPABILITY_PROFILE
 
     @classmethod
     def from_file(cls, path: Path) -> DriverRunConfig:
@@ -146,6 +161,8 @@ class DriverRunConfig:
                     else None
                 ),
                 symptom=payload.get("symptom"),
+                cluster_name=payload.get("cluster_name"),
+                capability_profile=payload.get("capability_profile", CAPABILITY_PROFILE),
             )
         except (KeyError, TypeError, ValueError):
             raise ArtifactError("Assistant driver configuration is incomplete") from None
@@ -153,7 +170,15 @@ class DriverRunConfig:
         return config
 
     def validate(self) -> None:
+        if self.capability_profile not in CAPABILITY_PROFILES:
+            raise ArtifactError("unsupported capability profile")
+        if self.capability_profile == INTERPLEX_CAPABILITY_PROFILE and (
+            self.comparable or self.observability_provider != "splunk" or not self.cluster_name
+        ):
+            raise ArtifactError("Interplex pilot requires Splunk, a stable cluster and comparable=false")
         validate_run_id(self.run_id)
+        if self.cluster_name is not None:
+            validate_cluster_name(self.cluster_name)
         if self.attempt < 1:
             raise ArtifactError("attempt number must be positive")
         if self.benchmark_profile not in {"full", "svelte"}:
@@ -399,9 +424,12 @@ class AssistantRunMetadata:
     agent_ended_at: datetime | None
     classification: TerminalOutcome
     telemetry_scope_warning: str | None = None
+    cluster_name: str | None = None
 
     def validate(self) -> None:
         validate_run_id(self.run_id)
+        if self.cluster_name is not None:
+            validate_cluster_name(self.cluster_name)
         if self.attempt < 1:
             raise ArtifactError("attempt number must be positive")
         required_strings = (
@@ -414,7 +442,9 @@ class AssistantRunMetadata:
         )
         if any(not value.strip() for value in required_strings):
             raise ArtifactError("run metadata contains an empty required field")
-        if self.capability_profile != CAPABILITY_PROFILE:
+        if self.capability_profile not in CAPABILITY_PROFILES or (
+            self.capability_profile == INTERPLEX_CAPABILITY_PROFILE and self.comparable
+        ):
             raise ArtifactError("run metadata has an unexpected capability profile")
         if self.requested_reasoning not in _REASONING_EFFORTS:
             raise ArtifactError("run metadata has invalid requested reasoning")
@@ -423,7 +453,9 @@ class AssistantRunMetadata:
         if self.classification not in _TERMINAL_OUTCOMES:
             raise ArtifactError("run metadata has invalid classification")
         if self.telemetry_scope_warning is not None and (
-            self.comparable or self.telemetry_scope_warning not in {
+            self.comparable
+            or self.telemetry_scope_warning
+            not in {
                 "Assistant tool trace queried telemetry before the provided time window",
                 "Assistant tool trace queried telemetry after the provided time window",
             }
@@ -467,6 +499,7 @@ class AssistantRunMetadata:
             "observability_chart_version": self.observability_chart_version,
             "hec_index": self.hec_index,
             "logs_connection_id": self.logs_connection_id,
+            **({"cluster_name": self.cluster_name} if self.cluster_name is not None else {}),
             "readiness_report": asdict(self.readiness_report) if self.readiness_report is not None else None,
             "attempt_started_at": self.attempt_started_at,
             "agent_started_at": self.agent_started_at,
@@ -474,7 +507,8 @@ class AssistantRunMetadata:
             "classification": classification,
             **(
                 {"telemetry_scope_warning": self.telemetry_scope_warning}
-                if self.telemetry_scope_warning is not None else {}
+                if self.telemetry_scope_warning is not None
+                else {}
             ),
             "included_in_diagnosis_pass_rate": classification
             not in {"infrastructure_invalid", "telemetry_scope_violation"},
@@ -963,7 +997,7 @@ def execute_assistant_attempt(
             # structured context contains no scenario, oracle or fault content.
             incident_scope = {
                 "environment": config.run_id,
-                "cluster": config.run_id,
+                "cluster": config.cluster_name or config.run_id,
                 "namespace": prompt_context["app_namespace"],
                 "start_ms": int(window_started_at.timestamp() * 1000),
                 "end_ms": int(window_ended_at.timestamp() * 1000),
@@ -974,6 +1008,14 @@ def execute_assistant_attempt(
                     "connection_id": connection_id,
                     "index": config.hec_index,
                 }
+        if config.capability_profile != assistant.configuration.capability_profile:
+            raise ConductorError("Driver and client capability profiles must match")
+        if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE:
+            # Current receivers ignore incident_scope. This pilot carries public
+            # selectors in instructions and audits calls; it is not isolation proof.
+            if incident_scope is None:
+                raise ConductorError("Interplex pilot requires an explicit incident scope")
+            action_instructions += interplex_pilot_action_suffix(incident_scope)
         # Selector enforcement belongs to the compatible receiver required by
         # the session contract. Retain the request and native calls for audit;
         # a completed stream alone is not a scope-capability acknowledgement.
@@ -1108,7 +1150,13 @@ def execute_assistant_attempt(
         requested_reasoning=assistant.configuration.reasoning,
         action_instructions=action_instructions,
         incident_scope=incident_scope,
-        action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
+        action_profile_id=(
+            "sregym-interplex-live-pilot-v1"
+            if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE
+            else "sregym-symptom-window-v1"
+            if config.symptom is not None
+            else None
+        ),
     )
     metadata = AssistantRunMetadata(
         run_id=config.run_id,
@@ -1117,7 +1165,7 @@ def execute_assistant_attempt(
         agent_version=config.agent_version,
         benchmark_profile=config.benchmark_profile,
         comparable=config.comparable,
-        capability_profile=CAPABILITY_PROFILE,
+        capability_profile=config.capability_profile,
         requested_model=assistant.configuration.model,
         resolved_model=assistant.configuration.model,
         requested_reasoning=assistant.configuration.reasoning,
@@ -1135,6 +1183,7 @@ def execute_assistant_attempt(
         agent_ended_at=ended_at,
         classification=terminal.outcome,
         telemetry_scope_warning=scope_warning,
+        cluster_name=config.cluster_name,
     )
     write_result = AssistantArtifactStore(
         config.artifacts_root,
@@ -1210,7 +1259,7 @@ def write_pre_agent_failure(
         agent_version=config.agent_version,
         benchmark_profile=config.benchmark_profile,
         comparable=config.comparable,
-        capability_profile=CAPABILITY_PROFILE,
+        capability_profile=config.capability_profile,
         requested_model=assistant_configuration.model,
         resolved_model=None,
         requested_reasoning=assistant_configuration.reasoning,
@@ -1227,6 +1276,7 @@ def write_pre_agent_failure(
         agent_started_at=None,
         agent_ended_at=None,
         classification="infrastructure_invalid",
+        cluster_name=config.cluster_name,
     )
     return AssistantArtifactStore(
         config.artifacts_root,
@@ -1238,7 +1288,13 @@ def write_pre_agent_failure(
                 prompt=rendered,
                 requested_model=assistant_configuration.model,
                 requested_reasoning=assistant_configuration.reasoning,
-                action_profile_id="sregym-symptom-window-v1" if config.symptom is not None else None,
+                action_profile_id=(
+                    "sregym-interplex-live-pilot-v1"
+                    if config.capability_profile == INTERPLEX_CAPABILITY_PROFILE
+                    else "sregym-symptom-window-v1"
+                    if config.symptom is not None
+                    else None
+                ),
             ),
             events=(),
             terminal=terminal,

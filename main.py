@@ -40,7 +40,6 @@ from sregym.agent_launcher import AgentLauncher
 from sregym.agent_registry import get_agent, list_agents
 from sregym.conductor.conductor import ALL_STAGES, Conductor, ConductorConfig
 from sregym.conductor.conductor_api import request_shutdown, run_api
-from sregym.conductor.constants import StartProblemResult
 from sregym.conductor.problem_sets import PROBLEM_SETS
 from sregym.observability import create_provider
 from sregym.observability.base import (
@@ -108,6 +107,12 @@ EVALUATION_DRAIN_TIMEOUT_SECONDS = 300
 CLEANUP_DRAIN_TIMEOUT_SECONDS = 300
 
 
+def problem_cleanup_timeout(conductor) -> float:
+    """Allow stateful reference recovery its own budget after agent grading."""
+    problem = getattr(conductor, "problem", None)
+    return getattr(problem, "cleanup_timeout_seconds", CLEANUP_DRAIN_TIMEOUT_SECONDS)
+
+
 def _http_endpoint(value: str) -> str:
     """Validate an additional endpoint supplied on the command line."""
     try:
@@ -164,6 +169,7 @@ def run_preflight_check(
         "opencode": "clients.opencode.driver",
         "gemini": "clients.geminicli.driver",
         "cursor": "clients.cursor.driver",
+        "mini-sre": "clients.mini_sre.driver",
         "assistant_v3": "clients.assistant_v3.driver",
     }
     module_path = agent_driver_modules.get(agent_name)
@@ -182,7 +188,7 @@ def run_preflight_check(
     if agent_name == "assistant_v3":
         preflight_env = {
             name: os.environ[name]
-            for name in ("ASSISTANT_V3_URL", "ASSISTANT_V3_AUTH_TOKEN", "SF_TOKEN")
+            for name in ("ASSISTANT_V3_URL", "ASSISTANT_V3_AUTH_TOKEN", "SF_TOKEN", "ASSISTANT_V3_CAPABILITY_PROFILE")
             if os.environ.get(name)
         }
     try:
@@ -216,6 +222,12 @@ def run_judge_preflight_check() -> None:
     logger.info("✅ Judge pre-flight check passed")
 
 
+def _problem_result_paths(base_dir: Path, agent: str, problem_id: str) -> tuple[Path, Path]:
+    final_path = base_dir / agent / problem_id / f"{problem_id}_{agent}_results.csv"
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    return final_path.with_name(f"_running_{final_path.name}"), final_path
+
+
 def get_current_datetime_formatted():
     now = datetime.now()
     formatted_datetime = now.strftime("%m%d_%H%M")
@@ -234,7 +246,7 @@ async def _wait_for_operator_inspection(*, problem_id: str, namespace: str, run_
     console.log("\n🔎 Inspection gate reached; the fault and telemetry exporters remain active.")
     console.log(f"   Problem: {problem_id}")
     console.log(f"   Namespace: {namespace}")
-    console.log(f"   Run/cluster scope: {run_id}")
+    console.log(f"   Attempt scope: {run_id}")
     try:
         await asyncio.to_thread(input, "Press Enter to launch the agent and continue this same attempt... ")
     except EOFError as exc:
@@ -309,6 +321,7 @@ def _artifact_environment(run: RunArtifacts):
 def _assistant_runtime_environment() -> dict[str, str]:
     """Return only the Assistant credentials/config needed by its isolated driver."""
     names = (
+        "ASSISTANT_V3_CAPABILITY_PROFILE",
         "ASSISTANT_V3_URL",
         "ASSISTANT_V3_AUTH_TOKEN",
         "SF_TOKEN",
@@ -331,7 +344,12 @@ def _write_assistant_driver_config(
     prompt_arm: str = "time_only",
 ) -> None:
     driver_config = _assistant_driver_config(
-        run, conductor, agent_version, provider, judge_backend, prompt_arm=prompt_arm,
+        run,
+        conductor,
+        agent_version,
+        provider,
+        judge_backend,
+        prompt_arm=prompt_arm,
     )
     readiness = conductor.observability_readiness
     payload = {
@@ -348,6 +366,8 @@ def _write_assistant_driver_config(
         "hec_index": driver_config.hec_index,
         "logs_connection_id": driver_config.logs_connection_id,
         "resolved_logs_connection_id": driver_config.resolved_logs_connection_id,
+        "cluster_name": driver_config.cluster_name,
+        "capability_profile": driver_config.capability_profile,
         "symptom": driver_config.symptom,
         "attempt_started_at": (
             driver_config.attempt_started_at.isoformat().replace("+00:00", "Z")
@@ -391,7 +411,12 @@ def _assistant_driver_config(
         attempt=run.attempt,
         artifacts_root=run.active_dir,
         benchmark_profile=get_profile(),
-        comparable=get_profile() == "full" and symptom is None,
+        comparable=(
+            get_profile() == "full"
+            and symptom is None
+            and os.environ.get("ASSISTANT_V3_CAPABILITY_PROFILE", "splunk_o11y_read_only_no_direct_kubernetes")
+            == "splunk_o11y_read_only_no_direct_kubernetes"
+        ),
         judge_model=os.environ["JUDGE_MODEL_ID"],
         judge_backend=judge_backend,
         observability_provider=provider.name,
@@ -401,9 +426,12 @@ def _assistant_driver_config(
         hec_index=getattr(configuration, "hec_index", None),
         logs_connection_id=getattr(configuration, "logs_connection_id", None),
         resolved_logs_connection_id=getattr(provider, "_connection_id", None),
+        cluster_name=getattr(configuration, "cluster_name", None),
+        capability_profile=os.environ.get(
+            "ASSISTANT_V3_CAPABILITY_PROFILE", "splunk_o11y_read_only_no_direct_kubernetes"
+        ),
         attempt_started_at=(
-            getattr(conductor, "incident_started_at", None)
-            or getattr(attempt_context, "attempt_started_at", None)
+            getattr(conductor, "incident_started_at", None) or getattr(attempt_context, "attempt_started_at", None)
         ),
         telemetry_window_ended_at=window_ended_at,
         symptom=symptom,
@@ -449,7 +477,11 @@ def _assistant_case_preflight(
     try:
         selected = subprocess.run(
             ["kubectl", "config", "current-context"],
-            shell=False, capture_output=True, text=True, check=True, timeout=10,
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         raise CaseGateError("the local Kind source context is unavailable") from None
@@ -465,13 +497,17 @@ def _assistant_case_preflight(
         }
         if conductor.problem_id == "cronjob_sidecar_blocks_completion_hotel_reservation":
             return wait_for_cronjob_pre_agent(
-                backend, source_reader=lambda: read_source_pods(app.namespace, context=selected), **common,
+                backend,
+                source_reader=lambda: read_source_pods(app.namespace, context=selected),
+                **common,
             )
         if conductor.problem_id == "duplicate_pvc_mounts_social_network":
             return wait_for_duplicate_pvc_mounts_pre_agent(
                 backend,
                 source_reader=lambda: (
-                    read_source_object("persistentvolumeclaim", "jaeger-pvc", namespace=app.namespace, context=selected),
+                    read_source_object(
+                        "persistentvolumeclaim", "jaeger-pvc", namespace=app.namespace, context=selected
+                    ),
                     read_source_pods(app.namespace, context=selected),
                 ),
                 **common,
@@ -481,7 +517,9 @@ def _assistant_case_preflight(
                 backend,
                 source_reader=lambda: (
                     read_source_cluster_object(
-                        "validatingwebhookconfiguration", "pod-policy.validation.k8s.io", context=selected,
+                        "validatingwebhookconfiguration",
+                        "pod-policy.validation.k8s.io",
+                        context=selected,
                     ),
                     read_source_events(app.namespace, context=selected),
                 ),
@@ -500,7 +538,10 @@ def _assistant_case_preflight(
             return wait_for_service_dns_pre_agent(
                 backend,
                 source_reader=lambda: read_source_object(
-                    "configmap", "coredns", namespace="kube-system", context=selected,
+                    "configmap",
+                    "coredns",
+                    namespace="kube-system",
+                    context=selected,
                 ),
                 **common,
             )
@@ -541,7 +582,9 @@ def _assistant_case_preflight(
             return wait_for_namespace_memory_quota_pre_agent(
                 backend,
                 source_reader=lambda: (
-                    read_source_object("resourcequota", "memory-limit-quota", namespace=app.namespace, context=selected),
+                    read_source_object(
+                        "resourcequota", "memory-limit-quota", namespace=app.namespace, context=selected
+                    ),
                     read_source_events(app.namespace, context=selected),
                 ),
                 **common,
@@ -550,7 +593,10 @@ def _assistant_case_preflight(
             return wait_for_valkey_auth_pre_agent(
                 backend,
                 source_reader=lambda: read_source_logs(
-                    app.namespace, "cart", context=selected, start=start,
+                    app.namespace,
+                    "cart",
+                    context=selected,
+                    start=start,
                 ),
                 **common,
             )
@@ -573,20 +619,27 @@ def _assistant_case_preflight(
             return wait_for_network_policy_pre_agent(
                 backend,
                 source_reader=lambda: read_source_object(
-                    "networkpolicy", "deny-all-recommendation",
-                    namespace=app.namespace, context=selected,
+                    "networkpolicy",
+                    "deny-all-recommendation",
+                    namespace=app.namespace,
+                    context=selected,
                 ),
                 **common,
             )
         if conductor.problem_id == "mutating_webhook_resource_limits_social_network":
             return wait_for_mutating_webhook_pre_agent(
-                backend, source_reader=lambda: read_source_pods(app.namespace, context=selected), **common,
+                backend,
+                source_reader=lambda: read_source_pods(app.namespace, context=selected),
+                **common,
             )
         if conductor.problem_id == "finalizer_deadlock_controller_hotel_reservation":
             return wait_for_finalizer_deadlock_pre_agent(
                 backend,
                 source_reader=lambda: read_source_logs(
-                    app.namespace, "cleanup-controller", context=selected, start=start,
+                    app.namespace,
+                    "cleanup-controller",
+                    context=selected,
+                    start=start,
                 ),
                 **common,
             )
@@ -594,7 +647,10 @@ def _assistant_case_preflight(
             return wait_for_kafka_pre_agent(
                 backend,
                 source_reader=lambda: read_source_logs(
-                    app.namespace, "orders-validator", context=selected, start=start,
+                    app.namespace,
+                    "orders-validator",
+                    context=selected,
+                    start=start,
                 ),
                 **common,
             )
@@ -619,7 +675,10 @@ def _assistant_case_preflight(
         return wait_for_edge_pre_agent(
             backend,
             source_reader=lambda: read_source_logs(
-                app.namespace, "frontend-proxy", context=selected, start=start,
+                app.namespace,
+                "frontend-proxy",
+                context=selected,
+                start=start,
             ),
             **common,
         )
@@ -653,13 +712,20 @@ def _assistant_inspection_preview(
 ) -> tuple[str, str]:
     """Render the same public-metadata prompt and UTC scope used by the driver."""
     config = _assistant_driver_config(
-        run, conductor, None, provider, judge_backend, prompt_arm=prompt_arm,
+        run,
+        conductor,
+        None,
+        provider,
+        judge_backend,
+        prompt_arm=prompt_arm,
     )
     if config.attempt_started_at is None or config.telemetry_window_ended_at is None:
         raise RuntimeError("Assistant inspection requires a completed telemetry readiness window")
     prompt = render_prompt(_assistant_prompt_context(conductor)).text
     instructions = _build_action_instructions(
-        config.attempt_started_at, config.telemetry_window_ended_at, symptom=config.symptom,
+        config.attempt_started_at,
+        config.telemetry_window_ended_at,
+        symptom=config.symptom,
     )
     return prompt, instructions
 
@@ -728,7 +794,7 @@ def driver_loop(
             """Run safety cleanup without letting a stuck Kubernetes call hang the campaign."""
             try:
                 conductor.finish_problem_in_background()
-                await conductor.wait_for_submission_work(timeout=CLEANUP_DRAIN_TIMEOUT_SECONDS)
+                await conductor.wait_for_submission_work(timeout=problem_cleanup_timeout(conductor))
             except TimeoutError:
                 conductor.abandon_submission_work()
                 conductor.results["cleanup_timed_out"] = True
@@ -825,8 +891,9 @@ def driver_loop(
 
             conductor.problem_id = pid
 
-            # Keep a record of results for this problem in a temp file in case an attempt fails
-            tmp_path = f"_running_{pid}_{agent_to_run}_results.csv"
+            # Keep partial results on the destination filesystem so publication
+            # remains atomic when results/ is a container bind mount.
+            tmp_path, final_csv_path = _problem_result_paths(base_dir, str(agent_to_run), pid)
 
             attempts_to_run = [
                 attempt for attempt in range(1, n_attempts + 1) if attempt not in completed_attempts.get(pid, set())
@@ -945,7 +1012,11 @@ def driver_loop(
                             snapshot[stage] = outcome
                     if run is not None and agent_to_run == "assistant_v3":
                         driver_config = _assistant_driver_config(
-                            run, conductor, None, provider, judge_backend,
+                            run,
+                            conductor,
+                            None,
+                            provider,
+                            judge_backend,
                             prompt_arm=assistant_prompt_arm,
                         )
                         write_pre_agent_failure(
@@ -973,8 +1044,6 @@ def driver_loop(
                         writer.writeheader()
                         writer.writerows(all_results_for_agent)
                     if deploy_cleanup_failed:
-                        final_csv_path = base_dir / str(agent_to_run) / pid / f"{pid}_{agent_to_run}_results.csv"
-                        final_csv_path.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(tmp_path, final_csv_path)
                         progress.advance(task_id, len(attempts_to_run) - attempt_position)
                         progress.stop()
@@ -999,11 +1068,6 @@ def driver_loop(
                     progress.advance(task_id, len(attempts_to_run) - attempt_position)
                     break
 
-                if result == StartProblemResult.SKIPPED_KHAOS_REQUIRED:
-                    console.log(f"⏭️  Skipping problem '{pid}': requires Khaos but running on emulated cluster")
-                    progress.advance(task_id, len(attempts_to_run) - attempt_position)
-                    break  # Skip to next problem
-
                 # If using external harness, fault is injected - exit now
                 if use_external_harness:
                     console.log(f"✅ Fault injected for problem '{pid}'. Exiting for external harness.")
@@ -1014,7 +1078,7 @@ def driver_loop(
 
                 if run is None:
                     run = RunArtifacts.create(
-                        staging_root=Path(".runtime"),
+                        staging_root=base_dir / ".runtime",
                         results_root=base_dir,
                         problem_id=pid,
                         agent=agent_to_run,
@@ -1022,15 +1086,24 @@ def driver_loop(
                     )
                 case_preflight_proof = None
                 case_preflight_failed = False
-                if agent_to_run == "assistant_v3" and provider.name == "splunk" and assistant_prompt_arm == "symptom_guided":
+                if (
+                    agent_to_run == "assistant_v3"
+                    and provider.name == "splunk"
+                    and assistant_prompt_arm == "symptom_guided"
+                ):
                     try:
                         case_preflight_proof = await asyncio.to_thread(
-                            _assistant_case_preflight, run, conductor, provider,
+                            _assistant_case_preflight,
+                            run,
+                            conductor,
+                            provider,
                         )
                         ended = str(case_preflight_proof["window"]["end"])
                         conductor.incident_ended_at = datetime.fromisoformat(ended.replace("Z", "+00:00"))
                         if case_preflight_proof["status"] == "ready_data_limited":
-                            console.log(f"✅ Pre-agent evidence checks passed for {pid}; causal mechanism requires additional access")
+                            console.log(
+                                f"✅ Pre-agent evidence checks passed for {pid}; causal mechanism requires additional access"
+                            )
                         else:
                             console.log(f"✅ Pre-agent causal and delivery checks passed for {pid}")
                     except CaseGateError as error:
@@ -1042,6 +1115,8 @@ def driver_loop(
                             "run_id": run.artifact_id,
                             "status": (error.proof or {}).get("status", "query_error"),
                         }
+                        if error.attempt_diagnostics is not None:
+                            case_preflight_proof["attempt_diagnostics"] = error.attempt_diagnostics
                         conductor.results["infrastructure_invalid"] = True
                         conductor.results["included_in_diagnosis_pass_rate"] = False
                         conductor.results["observability_error"] = "case_evidence"
@@ -1057,7 +1132,11 @@ def driver_loop(
                         raise RuntimeError("Inspection requires a deployed application")
                     if agent_to_run == "assistant_v3":
                         prompt, instructions = _assistant_inspection_preview(
-                            run, conductor, provider, judge_backend, prompt_arm=assistant_prompt_arm,
+                            run,
+                            conductor,
+                            provider,
+                            judge_backend,
+                            prompt_arm=assistant_prompt_arm,
                         )
                         console.log(f"\nAssistant v3 starter prompt:\n{prompt}")
                         console.log(f"\nAssistant v3 action instructions:\n{instructions}")
@@ -1067,6 +1146,7 @@ def driver_loop(
                         run_id=run.artifact_id,
                     )
                 agent_proc = None
+                conductor.agent_timeout_seconds = agent_timeout
 
                 if conductor.stage_sequence and not case_preflight_failed:
                     with _artifact_environment(run):
@@ -1093,7 +1173,7 @@ def driver_loop(
                     console.log("⏩ Agent launch skipped; waiting only for bounded cleanup")
                     if conductor.close_submissions():
                         try:
-                            await conductor.wait_for_submission_work(timeout=CLEANUP_DRAIN_TIMEOUT_SECONDS)
+                            await conductor.wait_for_submission_work(timeout=problem_cleanup_timeout(conductor))
                         except TimeoutError:
                             abort_campaign_after_attempt = True
                             conductor.abandon_submission_work()
@@ -1106,9 +1186,10 @@ def driver_loop(
                             conductor.record_incomplete_attempt("cleanup_failed")
 
                 timed_out = False
-                agent_start_time = time.time()
+                agent_start_time = time.monotonic()
+                conductor.agent_deadline_monotonic = agent_start_time + agent_timeout
                 while not abort_campaign_after_attempt and conductor.submission_stage != "done":
-                    if time.time() - agent_start_time > agent_timeout:
+                    if time.monotonic() > conductor.agent_deadline_monotonic:
                         timed_out = True
                         console.log(f"⏰ Agent timeout ({agent_timeout}s) exceeded, killing agent")
                         submission_work = conductor.close_submissions()
@@ -1198,7 +1279,7 @@ def driver_loop(
                 # freezing the attempt snapshot or starting another attempt.
                 if not abort_campaign_after_attempt and conductor.close_submissions():
                     try:
-                        await conductor.wait_for_submission_work(timeout=CLEANUP_DRAIN_TIMEOUT_SECONDS)
+                        await conductor.wait_for_submission_work(timeout=problem_cleanup_timeout(conductor))
                     except TimeoutError:
                         abort_campaign_after_attempt = True
                         conductor.abandon_submission_work()
@@ -1254,14 +1335,18 @@ def driver_loop(
                     if not (run.active_dir / "run_metadata.json").exists():
                         write_pre_agent_failure(
                             _assistant_driver_config(
-                                run, conductor, None, provider, judge_backend,
+                                run,
+                                conductor,
+                                None,
+                                provider,
+                                judge_backend,
                                 prompt_arm=assistant_prompt_arm,
                             ),
                             assistant_configuration=AssistantV3Config.from_env(),
                             safe_message=(
                                 "Pre-agent evidence gate failed; Assistant was not launched"
-                                if case_preflight_failed else
-                                "Assistant driver exited without a complete artifact set"
+                                if case_preflight_failed
+                                else "Assistant driver exited without a complete artifact set"
                             ),
                             prompt_context=_assistant_prompt_context(conductor),
                         )
@@ -1271,8 +1356,7 @@ def driver_loop(
                         cleanup_status="failed" if conductor.results.get("cleanup_failed") else "completed",
                         infrastructure_error=(
                             "Observability delivery audit failed"
-                            if conductor.results.get("observability_error")
-                            and conductor.observability_delivery is None
+                            if conductor.results.get("observability_error") and conductor.observability_delivery is None
                             else None
                         ),
                     )
@@ -1370,8 +1454,6 @@ def driver_loop(
                         logger.info(f"📊 Assistant v3 campaign scorecard updated at {scorecard_path}")
 
                 if attempt == attempts_to_run[-1] or abort_campaign_after_attempt:
-                    final_csv_path = base_dir / agent_to_run / pid / f"{pid}_{agent_to_run}_results.csv"
-                    final_csv_path.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(tmp_path, final_csv_path)
                     if abort_campaign_after_attempt:
                         logger.error(
@@ -1491,7 +1573,9 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
 
     validate_assistant_campaign(args)
     selected_agent_image, build_agent_image = resolve_agent_image(
-        getattr(args, "agent_image", None), judge_image=agent_image, force_build=args.force_build,
+        getattr(args, "agent_image", None),
+        judge_image=agent_image,
+        force_build=args.force_build,
     )
     agent_model, judge_model = _configure_model_environment(args)
     observability_provider = create_provider(getattr(args, "observability_provider", "none"))
@@ -1547,7 +1631,9 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
             "Run it with --internet-access open or enable container isolation."
         )
 
-    if not args.use_external_harness:
+    # Mitigation-only runs use the problem's executable oracle, not the
+    # diagnosis judge. They must also work with key-free agents like autosubmit.
+    if not args.use_external_harness and (args.stages is None or "diagnosis" in args.stages):
         run_judge_preflight_check()
 
     k8s_proxy_listen_host = (
@@ -1564,6 +1650,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
         block_workload_creation=internet_policy.is_filtered,
         stages=tuple(args.stages) if args.stages else None,
         baseline_override_s=getattr(args, "baseline", None),
+        propagation_override_s=getattr(args, "propagation", None),
     )
     LAUNCHER.set_internet_policy(conductor_config.internet_policy)
     LAUNCHER.set_container_hardening(harden_container)
@@ -1848,12 +1935,21 @@ if __name__ == "__main__":
         metavar="SECONDS",
         help="Override per-problem baseline duration (seconds of steady-state traffic before fault injection)",
     )
+    parser.add_argument(
+        "--propagation",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Override per-problem propagation duration (seconds to wait after fault injection, before the agent starts)",
+    )
     args = parser.parse_args()
 
     if args.n_attempts is not None and args.n_attempts < 1:
         parser.error("--n-attempts must be a positive integer")
     if args.baseline is not None and args.baseline < 0:
         parser.error("--baseline must be a non-negative integer")
+    if args.propagation is not None and args.propagation < 0:
+        parser.error("--propagation must be a non-negative integer")
     if args.use_external_harness and args.suite:
         parser.error("--use-external-harness cannot be used with --suite; use --problem instead")
     if args.inspect_before_agent and args.problem is None:

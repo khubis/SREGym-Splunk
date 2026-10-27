@@ -447,6 +447,7 @@ def test_prepare_creates_secret_through_api_and_runs_idempotent_helm_upgrade():
     assert first.run_id == RUN_ID
     assert first.endpoint == f"{RELEASE_NAME}.{NAMESPACE}.svc.cluster.local:4317"
     assert first.resource_attributes == {
+        "k8s.cluster.name": RUN_ID,
         "deployment.environment": RUN_ID,
         "deployment.environment.name": RUN_ID,
         "sregym.run.id": RUN_ID,

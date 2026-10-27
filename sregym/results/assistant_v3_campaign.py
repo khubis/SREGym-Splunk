@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from clients.assistant_v3.client import INTERPLEX_CAPABILITY_PROFILE
 from sregym.conductor.problem_sets import SREGYM_LITE_PROBLEMS
 
 CAMPAIGN_DIRNAME = "assistant_v3_campaign"
@@ -313,7 +314,12 @@ def _build_snapshot(batch_dir: Path, run_dir: Path) -> dict[str, Any]:
         raise CampaignArtifactError("run metadata is missing problem identity or attempt")
     pre_agent_path = run_dir / "splunk_lite_pre_agent.json"
     pre_agent = None
-    if request.get("action_profile_id") == "sregym-symptom-window-v1":
+    action_profile = request.get("action_profile_id")
+    if action_profile == "sregym-interplex-live-pilot-v1" and (
+        metadata.get("capability_profile") != INTERPLEX_CAPABILITY_PROFILE or metadata.get("comparable") is not False
+    ):
+        raise CampaignArtifactError("Interplex pilot requires its explicit noncomparable capability profile")
+    if action_profile in {"sregym-symptom-window-v1", "sregym-interplex-live-pilot-v1"}:
         if not pre_agent_path.exists():
             if answer is not None:
                 raise CampaignArtifactError("guided attempt lacks ready pre-agent evidence")

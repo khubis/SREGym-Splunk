@@ -10,7 +10,9 @@ import main as benchmark_main
 from clients.assistant_v3.driver import ArtifactError, ConductorClient, DriverRunConfig, execute_assistant_attempt
 
 
-def write_native_configuration(monkeypatch, tmp_path, *, selected, index, resolved=None):
+def write_native_configuration(monkeypatch, tmp_path, *, selected, index, resolved=None, cluster_name=None):
+    # Exercise the default independently of the developer's private pilot env.
+    monkeypatch.delenv("ASSISTANT_V3_CAPABILITY_PROFILE", raising=False)
     monkeypatch.setattr(benchmark_main, "get_profile", lambda: "svelte")
     monkeypatch.setenv("JUDGE_MODEL_ID", "fixed-judge")
     start = datetime(2026, 10, 1, 12, tzinfo=UTC)
@@ -23,19 +25,21 @@ def write_native_configuration(monkeypatch, tmp_path, *, selected, index, resolv
     )
     provider = SimpleNamespace(
         name="splunk",
-        configuration=SimpleNamespace(hec_index=index, logs_connection_id=selected),
+        configuration=SimpleNamespace(hec_index=index, logs_connection_id=selected, cluster_name=cluster_name),
         _connection_id=resolved or selected or "resolved-default",
     )
     benchmark_main._write_assistant_driver_config(run, conductor, "v3", provider, "api")
     return tmp_path / "assistant_v3_driver_config.json"
 
 
+@pytest.mark.parametrize("cluster_name", [None, "sregym-kind-local"])
 @pytest.mark.parametrize("selected,index", [(None, None), (None, "events"), ("selected", "events")])
 def test_native_config_preserves_selection_and_resolved_routing_through_actual_dispatch(
-    monkeypatch, tmp_path, selected, index
+    monkeypatch, tmp_path, selected, index, cluster_name
 ):
-    path = write_native_configuration(monkeypatch, tmp_path, selected=selected, index=index)
+    path = write_native_configuration(monkeypatch, tmp_path, selected=selected, index=index, cluster_name=cluster_name)
     config = DriverRunConfig.from_file(path)
+    assert config.cluster_name == cluster_name
     assert config.logs_connection_id == selected
     resolved = selected or "resolved-default"
     assert config.resolved_logs_connection_id == resolved

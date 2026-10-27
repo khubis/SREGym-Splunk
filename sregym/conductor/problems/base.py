@@ -16,13 +16,12 @@ class Problem(ABC):
         # Seconds of steady-state traffic to run before fault injection. Override in subclass.
         self.baseline_duration_s: int = 0
 
+        # Seconds to wait after fault injection for it to reach telemetry. Override in subclass.
+        self.propagation_duration_s: int = 0
+
         # Optional: attach oracles in subclass
         self.diagnosis_oracle = None
         self.mitigation_oracle = None
-
-    def requires_khaos(self) -> bool:
-        """Override this method to return True if the problem requires Khaos for fault injection."""
-        return False
 
     @classmethod
     def build_structured_root_cause(
@@ -43,9 +42,9 @@ class Problem(ABC):
         return f"[fault_spec] {meta} || {description.strip()}"
 
     @abstractmethod
-    def inject_fault(self):
+    def inject_fault(self) -> bool | None:
         pass
 
     @abstractmethod
-    def recover_fault(self):
+    def recover_fault(self) -> bool | None:
         pass

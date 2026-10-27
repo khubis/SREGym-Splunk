@@ -1,6 +1,37 @@
+> Current upstream SREGym 1.1 Lite contains 17 active cases. The earlier 21-case results and retired prompt recipes are historical evidence; current runs use the upstream registry. Model and judge settings are unchanged.
+
 # Run Assistant V3 against Splunk with SREGym-Lite
 
-This fork's wrapper runs one or all 21 Lite cases sequentially: inject a fault,
+## Stable Kubernetes cluster identity
+
+Set `SPLUNK_CLUSTER_NAME=sregym-kind-local` in the private environment file to
+keep one Splunk cluster identity across attempts and local Kind recreations.
+Use a distinct name for each physical cluster exporting to the same org. This
+name is what the Kubernetes Context Connector wizard should select.
+
+Run from the feature worktree containing this change and pass the shared env
+file explicitly, as shown below. Each attempt's collector setup reads the name;
+adding the variable alone does not rename an already deployed collector or add
+support to an older checkout. After recreating Kind, reinstall telemetry and the
+connector using the same configured name.
+
+Attempt identity remains separate: metrics and logs carry `sregym.run.id`, and
+traces retain the unique deployment environment. Delivery/evidence queries use
+the stable cluster plus the attempt scope. Assistant receives the same stable
+cluster in its structured incident context. New run metadata saves `cluster_name`
+so later evidence checks use the original identity even if local settings change.
+Older saved attempts without that field continue to use their run ID as cluster
+name. Leaving `SPLUNK_CLUSTER_NAME` unset preserves that legacy configuration
+behavior; the current template opts in to the stable name.
+
+This setting does not enable Interplex tool use in the existing Splunk-only
+benchmark capability mode. Connector onboarding and capability/visibility checks
+are separate. To rename an existing idle collector before onboarding, update its
+Helm `clusterName` and matching collector telemetry attribute together, preserve
+its attempt attributes, then verify fresh metrics under the stable name. Do not
+start a new attempt merely to rename a cluster.
+
+This fork's wrapper runs one or all 17 active Lite cases sequentially: inject a fault,
 send metrics/traces/logs/events to your Splunk org, check representative causal
 telemetry before launching Assistant V3, collect its diagnosis and ATIF trace,
 grade it with the unchanged benchmark judge, and package the results by case.
@@ -110,6 +141,39 @@ If you have an approved non-gateway endpoint, set
 `SREGYM_LLM_GATEWAY_SERVICE_NAME` empty. Use a different output directory;
 the wrapper will not mix judge routes in one campaign.
 
+### If collector metrics exports return HTTP 403
+
+A Ready collector Pod does not prove successful ingestion. Check its exporter
+logs and query recent `k8s.pod.phase` and `container.cpu.utilization` series
+with the configured `k8s.cluster.name`; retain the attempt filter when checking
+a benchmark run. Logs use the separate HEC credential, so working logs do not
+establish that metrics or traces are arriving.
+
+Check the ingestion token's enabled state, expiration, `INGEST` scope and org
+before replacing it. A 403 alone does not establish an expired token or an
+incorrect endpoint. The Kubernetes Secret matching the private env file also
+does not establish which credential an already running exporter loaded.
+
+The normal `prepare_attempt` path updates the credential Secret and restarts
+each collector workload before checking telemetry readiness. When maintaining
+an existing idle installation outside that path, updating the Secret alone is
+insufficient: the Collector reads its file-based configuration at startup.
+With benchmark execution paused, reload the existing configuration explicitly:
+
+```bash
+kubectl --context kind-kind -n sregym-observability rollout restart deployment/sregym-splunk-otel
+kubectl --context kind-kind -n sregym-observability rollout status deployment/sregym-splunk-otel --timeout=5m
+kubectl --context kind-kind -n sregym-observability rollout restart deployment/sregym-splunk-otel-k8s-cluster-receiver
+kubectl --context kind-kind -n sregym-observability rollout status deployment/sregym-splunk-otel-k8s-cluster-receiver --timeout=5m
+kubectl --context kind-kind -n sregym-observability rollout restart daemonset/sregym-splunk-otel-agent
+kubectl --context kind-kind -n sregym-observability rollout status daemonset/sregym-splunk-otel-agent --timeout=5m
+```
+
+Verify fresh metric timestamps and absence of continuing exporter failures
+afterward. A restart restoring export is recovery evidence; it does not by
+itself prove why the previous process received 403. Full benchmark readiness
+still requires the application's metrics, logs and traces, plus delivery checks.
+
 ## 3. Start Assistant V3 separately
 
 This is the **LangChain Deep Agents V3** server from a separate `assistant`
@@ -135,13 +199,18 @@ memory gateway opt-in or custom embedding-routing branch is needed.
 
 If you need the separate repository, clone
 `https://cd.splunkdev.com/observability/ai/assistant.git` using your authorized
-GitLab credentials. If SSH access is unavailable, use the HTTPS credential
-helper (authenticate with `dev-login gitlab` first if needed):
+GitLab credentials. Authenticate with `dev-login gitlab` if needed. Preserve
+local edits before switching branches.
+
+After selecting a current main checkout, sync that checkout's locked dependencies:
 
 ```bash
-git -c credential.helper='!glab auth git-credential' clone \
-  https://cd.splunkdev.com/observability/ai/assistant.git
+dev-login artifactory >/dev/null
+uv sync --locked
 ```
+
+Keep the two repositories' virtual environments separate; their Python
+requirements differ. The Assistant commands use its own `uv` environment.
 
 Chat and memory now share the V3 gateway selector and URL; their model choices
 remain separate:
@@ -160,14 +229,13 @@ callers. Org/service headers are attribution, not a security boundary.
 Use a **fresh dedicated memory database** for the default small-model vectors.
 If migrating from our earlier template, remove its embedding-model and routing
 overrides from your private env file and use the new small-memory database name.
-Do not reuse an index containing large-model (3072-dimensional) vectors with the
-default small model (1536 dimensions); it needs rebuilding or a fresh database.
+Do not reuse an index containing large-model (3072-dimensional) vectors with
+the default small model (1536 dimensions); it needs rebuilding or a fresh database.
 `AIMEMORY_DB_NAME` and
 `MEMORY_PG_DATABASE` must match; the V3 Make target exports the former as the
-latter. The V3 memory routing change does not change the separate legacy
-documentation-search embedding path. The template also gives DeepEval an explicit
-read-only cache location, avoiding a startup error caused by an empty generated
-cache path.
+latter. The V3 memory routing change does not change the separate legacy documentation-search
+embedding path. The template also gives DeepEval an explicit read-only cache
+location, avoiding a startup error caused by an empty generated cache path.
 
 Do not set `ASSISTANT_V3_OPENAI_BASE_URL` when gateway mode is enabled; V3
 rejects that combination. The Assistant server derives its own gateway
@@ -262,6 +330,54 @@ The runner checks that it can authenticate to Assistant before injecting a
 fault, but cannot inspect which org an already-running Assistant server uses.
 Confirm its startup configuration matches this file. Refresh the JWT if it
 expires during a long suite.
+
+## Interplex integration pilot
+
+Enable the existing Kubernetes specialist in the separate Assistant server with
+`INTERPLEX_ENABLED=true` and a reachable `INTERPLEX_GATEWAY_HOST`. Install its
+registered connector separately in `sregym-context-connector`, using the stable
+telemetry cluster name and the intended read-only role.
+
+For the benchmark child, opt in with
+`ASSISTANT_V3_CAPABILITY_PROFILE=splunk_o11y_read_only_interplex_pilot` in the
+private SREGym env. This mode records a distinct capability profile and is
+always noncomparable. The default still rejects Kubernetes tool activity. The
+pilot permits a finite list of Interplex read tools and audits their requested
+cluster and namespace; it does not grant kubectl, shell or Kubernetes writes.
+The current receiver ignores `incident_scope`, so this mode also supplies public
+cluster, namespace, environment and log-source selectors in action instructions.
+It explicitly distinguishes current Kubernetes observations from historical
+telemetry. This is instruction plus trace auditing, not enforced isolation.
+
+The mode preserves outbound TCP 443 only for the matching connector namespace
+and release labels. Application egress remains restricted. Use a new named
+output directory and an isolated `SREGYM_CACHE_DIR` for this pilot. Its baseline
+must be captured with the connector namespace, role and binding already
+installed, before any evaluated application or fault exists; otherwise normal
+baseline reconciliation can delete the connector. Preserve another campaign's
+baseline cache rather than overwriting it.
+
+Run the same one-case command below, retaining the normal telemetry, causal,
+delivery, judge and cleanup checks. The local Assistant URL must be reachable
+from the agent container; for the separate development server use
+`http://host.docker.internal:<port>`. Rebuild the agent image after client or
+driver changes. Changing capability profiles changes campaign identity.
+
+An integration-valid pilot does not establish benchmark visibility parity:
+connector reads do not automatically inherit SREGym proxy filtering of hidden
+namespaces or load-generator resources. Record observed Kubernetes arguments,
+results and limitations before interpreting scores or expanding to all 17.
+
+Verified October 21 with the complete CronJob case lifecycle: metrics, logs,
+traces and Kubernetes object/event samples were present before the turn and
+in post-grade queries. Delivery was valid/drained, with zero final queues and
+send/enqueue failure deltas. Assistant automatically made 26 Interplex calls
+(25 successes; one Services listing denied by unchanged RBAC), and the
+unchanged judge scored the diagnosis 89/100. It made no `o11y_*` calls, so this
+proves coexisting telemetry delivery and Interplex use, not combined-source
+reasoning. Historical timing calibration and visibility parity remain
+unverified. The local gitignored package is
+`results/reproductions/interplex-full-case-20261021/summary.md`.
 
 ## 4. Smoke-test one case, then run the suite
 
