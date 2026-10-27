@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 from collections.abc import Iterable
 
 import yaml
@@ -26,6 +27,11 @@ POLICY_LABEL_KEY = "network-access"
 POLICY_LABEL_VALUE = "restricted"
 CLUSTER_DNS_SELECTOR = "projectcalico.org/namespace == 'kube-system' && k8s-app == 'kube-dns'"
 EXTERNAL_TELEMETRY_SELECTOR = "projectcalico.org/namespace == 'sregym-observability'"
+INTERPLEX_CONNECTOR_SELECTOR = (
+    "projectcalico.org/namespace == 'sregym-context-connector' && "
+    "app.kubernetes.io/name == 'context-connector' && "
+    "app.kubernetes.io/instance == 'k8s-context-connector'"
+)
 DOCKER_DNS_LOOPBACK = "127.0.0.11/32"
 
 
@@ -229,6 +235,17 @@ class ClusterEgressBoundary:
         # their configured destination. Keep the exception confined to the
         # harness-owned namespace; evaluated workloads remain denied below.
         rules.append({"action": "Pass", "source": {"selector": EXTERNAL_TELEMETRY_SELECTOR}})
+        if os.environ.get("ASSISTANT_V3_CAPABILITY_PROFILE") == "splunk_o11y_read_only_interplex_pilot":
+            # Preserve only the harness connector's outbound relay. Workload
+            # egress and all other namespaces retain the original boundary.
+            rules.append(
+                {
+                    "action": "Pass",
+                    "protocol": "TCP",
+                    "source": {"selector": INTERPLEX_CONNECTOR_SELECTOR},
+                    "destination": {"ports": [443]},
+                }
+            )
         if ipv4:
             rules.append(
                 {

@@ -60,14 +60,22 @@ def make_run(tmp_path: Path, *, connection="HPEC1vyAAAA", profile="sregym-stratu
     return run
 
 
-def test_verifier_uses_exact_window_connection_and_saves_sanitized_partial_proof(tmp_path):
+@pytest.mark.parametrize("cluster_name", [None, "sregym-kind-local"])
+def test_verifier_uses_exact_window_connection_and_saves_sanitized_partial_proof(tmp_path, cluster_name):
     run = make_run(tmp_path)
+    if cluster_name is not None:
+        metadata_path = run / "run_metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["cluster_name"] = cluster_name
+        metadata_path.write_text(json.dumps(metadata))
     backend = FakeBackend(failures={"pods"})
     path = verify_case_delivery(run, backend=backend, expected_connection="HPEC1vyAAAA", query_attempts=1)
     proof = json.loads(path.read_text())
 
     assert path == run / "splunk_lite_delivery.json"
     assert proof["schema"] == "sregym.splunk_lite_delivery.v1"
+    assert proof["cluster_name"] == (cluster_name or RUN_ID)
+    assert all(call[1].cluster_name == (cluster_name or RUN_ID) for call in backend.calls)
     assert proof["case_id"] == CASE
     assert proof["window"] == {"start": START, "end": END}
     assert proof["logs_connection_id"] == "HPEC1vyAAAA"
@@ -163,6 +171,8 @@ def test_verifier_rejects_missing_or_invalid_attempt_json(tmp_path, filename, co
     ("problem_id", "not-a-lite-case", "registered Lite"),
     ("observability_provider", "none", "Splunk provider"),
     ("run_id", None, "opaque run identity"),
+    ("cluster_name", "", "invalid cluster identity"),
+    ("cluster_name", ["sregym-kind-local"], "invalid cluster identity"),
 ])
 def test_verifier_rejects_wrong_attempt_metadata(tmp_path, field, value, message):
     run = make_run(tmp_path)
@@ -255,3 +265,53 @@ def test_module_cli_help_needs_no_credentials(monkeypatch, capsys):
             runpy.run_module("sregym.results.splunk_lite_evidence", run_name="__main__")
     assert raised.value.code == 0
     assert "--run-dir" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mutation", [None, "scope", "symptom", "capability", "comparable"])
+def test_interplex_evidence_requires_exact_public_scope_and_distinct_profile(tmp_path, mutation):
+    from clients.assistant_v3.client import INTERPLEX_CAPABILITY_PROFILE, interplex_pilot_action_suffix
+    from clients.assistant_v3.driver import _build_action_instructions
+    from sregym.results.splunk_lite_cases import load_prompt_recipe
+
+    run = make_run(tmp_path)
+    mp = run / "run_metadata.json"
+    metadata = json.loads(mp.read_text())
+    metadata.update(capability_profile=INTERPLEX_CAPABILITY_PROFILE, cluster_name="sregym-kind-local", hec_index="main")
+    start, end = (
+        datetime.fromisoformat(START.replace("Z", "+00:00")),
+        datetime.fromisoformat(END.replace("Z", "+00:00")),
+    )
+    scope = {
+        "environment": RUN_ID,
+        "cluster": "sregym-kind-local",
+        "namespace": "hotel-reservation",
+        "start_ms": int(start.timestamp() * 1000),
+        "end_ms": int(end.timestamp() * 1000),
+        "logs_source": {"connection_id": "HPEC1vyAAAA", "index": "main"},
+    }
+    rp = run / "assistant_v3/request.json"
+    request = json.loads(rp.read_text())
+    request.update(
+        action_profile_id="sregym-interplex-live-pilot-v1",
+        incident_scope=scope,
+        action_instructions=_build_action_instructions(start, end, symptom=load_prompt_recipe(CASE).symptom)
+        + interplex_pilot_action_suffix(scope),
+    )
+    if mutation == "scope":
+        request["incident_scope"]["namespace"] = "other"
+    if mutation == "symptom":
+        request["action_instructions"] = request["action_instructions"].replace("background task", "sidecar")
+    if mutation == "capability":
+        metadata.pop("capability_profile")
+    if mutation == "comparable":
+        metadata["comparable"] = True
+    mp.write_text(json.dumps(metadata))
+    rp.write_text(json.dumps(request))
+    backend = FakeBackend()
+    if mutation:
+        with pytest.raises(EvidenceError):
+            verify_case_delivery(run, backend=backend, expected_connection="HPEC1vyAAAA", query_attempts=1)
+        assert backend.calls == []
+    else:
+        assert verify_case_delivery(run, backend=backend, expected_connection="HPEC1vyAAAA", query_attempts=1).exists()
+        assert len(backend.calls) == 6

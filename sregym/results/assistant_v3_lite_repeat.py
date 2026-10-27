@@ -25,6 +25,7 @@ from pathlib import Path
 
 import psutil
 
+from clients.assistant_v3.client import CAPABILITY_PROFILE, CAPABILITY_PROFILES
 from sregym.conductor.problem_sets import SREGYM_LITE_PROBLEMS
 from sregym.results.assistant_v3_campaign import checkpoint_attempt
 from sregym.results.lite_case_dossiers import build as build_dossiers
@@ -79,6 +80,8 @@ def resolve_environment(source: Mapping[str, str], *, profile: str) -> dict[str,
     if profile not in {"canonical", "synthetic"}:
         raise RepeatError("credentials must be canonical or synthetic")
     result = dict(source)
+    if result.get("ASSISTANT_V3_CAPABILITY_PROFILE", CAPABILITY_PROFILE) not in CAPABILITY_PROFILES:
+        raise RepeatError("unsupported Assistant capability profile")
     if profile == "synthetic":
         missing_aliases = [name for name in _ALIASES if not result.get(name)]
         if missing_aliases:
@@ -221,6 +224,7 @@ def validate_selected_identity(selected: Mapping[str, Path], environment: Mappin
         "observability_provider": "splunk",
         "benchmark_profile": "svelte",
         "logs_connection_id": environment["SPLUNK_LOGS_CONNECTION_ID"],
+        "capability_profile": environment.get("ASSISTANT_V3_CAPABILITY_PROFILE", CAPABILITY_PROFILE),
         "requested_model": "gpt-5.6-luna",
         "requested_reasoning": "medium",
         "judge_model": environment.get("SREGYM_LITE_JUDGE_MODEL", _DEFAULT_JUDGE_MODEL),
@@ -231,7 +235,7 @@ def validate_selected_identity(selected: Mapping[str, Path], environment: Mappin
         except (OSError, ValueError) as error:
             raise RepeatError(f"unreadable attempt identity for {case_id}") from error
         for field, value in expected.items():
-            if metadata.get(field) != value:
+            if metadata.get(field, CAPABILITY_PROFILE if field == "capability_profile" else None) != value:
                 raise RepeatError(f"attempt {case_id} has mismatched {field} identity")
 
 
@@ -276,7 +280,7 @@ def write_campaign_summary(
     lines = [
         "# Assistant V3 SREGym-Lite campaign",
         "",
-        "This `svelte`, symptom-guided, Splunk-only pilot is **not leaderboard-comparable**. "
+        "This `svelte`, symptom-guided pilot (see each attempt's capability profile) is **not leaderboard-comparable**. "
         "Scores are from the unchanged benchmark judge; Splunk-visible numeric grading is unverified.",
         "",
         "| Case | Outcome | Benchmark /100 | Pre-agent causal check | Evidence and raw results |",
@@ -449,6 +453,7 @@ def _campaign_fingerprint(
         "logs_index": environment.get("SPLUNK_HEC_INDEX", "main"),
         "assistant_url": environment["ASSISTANT_V3_URL"],
         "agent_image": agent_image,
+        "capability_profile": environment.get("ASSISTANT_V3_CAPABILITY_PROFILE", CAPABILITY_PROFILE),
         "deployment_profile": "svelte",
         "prompt_arm": "symptom_guided",
         "agent_model": "gpt-5.6-luna",
